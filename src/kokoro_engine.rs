@@ -83,7 +83,7 @@ impl TtsEngine {
         let voice_data = self.voices.get(voice)
             .ok_or_else(|| format!("Voice '{}' not found", voice))?;
 
-        // Convert text to phonemes using espeak-ng (American English, with stress)
+        // Convert text to phonemes using espeak-ng (American English)
         let phonemes = text_to_phonemes(text, "en-us", None, true, true)
             .map_err(|e| format!("Failed to convert text to phonemes: {:?}", e))?;
         let phonemes_str = phonemes.join("");

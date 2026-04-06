@@ -30,6 +30,7 @@ pub struct App {
     status_msg: String,
     needs_render: bool,
     reading_active: bool,
+    page_input: String, // text field for page number input
 }
 
 impl App {
@@ -72,6 +73,7 @@ impl App {
             status_msg: String::new(),
             needs_render: false,
             reading_active: false,
+            page_input: String::new(),
         };
 
         if let Some(path) = initial_pdf {
@@ -114,6 +116,9 @@ impl App {
                     ));
                     self.page_text = text;
                     self.page_img_size = (width, height);
+                    // Pre-synthesize first sentences so Play is instant
+                    let voice = VOICES[self.selected_voice].0;
+                    self.tts.precache_page(&self.page_text, voice);
                 }
                 Err(e) => {
                     self.status_msg = format!("Render error: {}", e);
@@ -208,11 +213,34 @@ impl eframe::App for App {
                         self.tts.stop();
                         self.reading_active = false;
                         self.go_to_page(self.current_page - 1);
+                        self.page_input = format!("{}", self.current_page + 1);
+                    }
+
+                    // Editable page number field
+                    let input = egui::TextEdit::singleline(&mut self.page_input)
+                        .desired_width(36.0)
+                        .horizontal_align(egui::Align::Center)
+                        .font(FontId::proportional(14.0))
+                        .return_key(egui::KeyboardShortcut::new(egui::Modifiers::NONE, egui::Key::Enter));
+                    let output = input.show(ui);
+                    // Navigate FIRST (before sync overwrites the input)
+                    if output.response.lost_focus() {
+                        if let Ok(page_num) = self.page_input.trim().parse::<usize>() {
+                            if page_num >= 1 && page_num <= page_count {
+                                self.tts.stop();
+                                self.reading_active = false;
+                                self.go_to_page(page_num - 1);
+                            }
+                        }
+                    }
+                    // Sync display when not editing
+                    if !output.response.has_focus() {
+                        self.page_input = format!("{}", self.current_page + 1);
                     }
 
                     ui.label(
-                        RichText::new(format!("{} / {}", self.current_page + 1, page_count))
-                            .color(TEXT_PRIMARY)
+                        RichText::new(format!("/ {}", page_count))
+                            .color(TEXT_DIM)
                             .font(FontId::proportional(14.0)),
                     );
 
@@ -223,6 +251,7 @@ impl eframe::App for App {
                         self.tts.stop();
                         self.reading_active = false;
                         self.go_to_page(self.current_page + 1);
+                        self.page_input = format!("{}", self.current_page + 1);
                     }
 
                     ui.add_space(16.0);

@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::io::Cursor;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -5,6 +7,12 @@ use std::time::{Duration, Instant};
 
 use hound;
 use rodio;
+
+fn hash_string(s: &str) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    s.hash(&mut hasher);
+    hasher.finish()
+}
 
 pub const VOICES: &[(&str, &str)] = &[
     ("af_heart", "Heart (F, US)"),
@@ -187,6 +195,14 @@ struct PlaybackInfo {
     play_start: Option<Instant>,
 }
 
+/// Pre-synthesized audio for sentences, keyed by sentence text
+struct PreCache {
+    /// Map from sentence text -> audio samples
+    audio: HashMap<String, Vec<f32>>,
+    /// Which page text this cache is for (invalidate on page change)
+    page_text_hash: u64,
+}
+
 pub struct TtsEngine {
     state: Arc<Mutex<TtsState>>,
     sink: Arc<Mutex<Option<rodio::Sink>>>,
@@ -194,9 +210,9 @@ pub struct TtsEngine {
     stop_flag: Arc<Mutex<bool>>,
     playback: Arc<Mutex<PlaybackInfo>>,
     sentences: Arc<Mutex<Vec<String>>>,
-    /// Persistent Kokoro model — loaded once, reused across pages
     model: Arc<Mutex<Option<crate::kokoro_engine::TtsEngine>>>,
     model_ready: Arc<Mutex<bool>>,
+    precache: Arc<Mutex<PreCache>>,
 }
 
 impl TtsEngine {
@@ -227,6 +243,10 @@ impl TtsEngine {
             sentences: Arc::new(Mutex::new(vec![])),
             model: Arc::new(Mutex::new(None)),
             model_ready: Arc::new(Mutex::new(false)),
+            precache: Arc::new(Mutex::new(PreCache {
+                audio: HashMap::new(),
+                page_text_hash: 0,
+            })),
         };
 
         // Pre-load the Kokoro model in background on startup
@@ -255,6 +275,70 @@ impl TtsEngine {
 
     pub fn state(&self) -> TtsState {
         self.state.lock().unwrap().clone()
+    }
+
+    /// Pre-synthesize first sentences of a page in the background.
+    /// Call this when a new page is rendered, before user clicks Play.
+    pub fn precache_page(&self, text: &str, voice: &str) {
+        if !*self.model_ready.lock().unwrap() {
+            return;
+        }
+
+        let text_hash = hash_string(text);
+        {
+            let cache = self.precache.lock().unwrap();
+            if cache.page_text_hash == text_hash && !cache.audio.is_empty() {
+                return; // already cached
+            }
+        }
+
+        // Clear old cache
+        {
+            let mut cache = self.precache.lock().unwrap();
+            cache.audio.clear();
+            cache.page_text_hash = text_hash;
+        }
+
+        let sentences = split_into_sentences(text);
+        if sentences.is_empty() {
+            return;
+        }
+
+        let model = self.model.clone();
+        let precache = self.precache.clone();
+        let voice = voice.to_string();
+
+        let stop_flag = self.stop_flag.clone();
+
+        // Pre-generate first 3 sentences in background
+        thread::spawn(move || {
+            let to_cache: Vec<_> = sentences.into_iter().take(3).collect();
+            for sentence in &to_cache {
+                // Abort if speak() was called (stop_flag set)
+                if *stop_flag.lock().unwrap() {
+                    return;
+                }
+                // Use try_lock to avoid blocking speak()
+                let samples = {
+                    let model_guard = model.try_lock();
+                    match model_guard {
+                        Ok(mut guard) => {
+                            if let Some(ref mut tts) = *guard {
+                                tts.synthesize(sentence, Some(&voice))
+                            } else {
+                                return;
+                            }
+                        }
+                        Err(_) => return, // model busy (speak running), abort precache
+                    }
+                };
+                if let Ok(samples) = samples {
+                    let mut cache = precache.lock().unwrap();
+                    cache.audio.insert(sentence.clone(), samples);
+                }
+            }
+            eprintln!("Pre-cached {} sentences", to_cache.len());
+        });
     }
 
     pub fn progress(&self) -> (usize, usize, usize) {
@@ -302,6 +386,7 @@ impl TtsEngine {
         let playback = self.playback.clone();
         let sentences_holder = self.sentences.clone();
         let model = self.model.clone();
+        let precache = self.precache.clone();
 
         *stop_flag.lock().unwrap() = false;
         *state.lock().unwrap() = TtsState::Generating;
@@ -344,7 +429,15 @@ impl TtsEngine {
 
                 playback.lock().unwrap().generating_idx = i + 1;
 
-                let samples = {
+                // Check precache first — if already synthesized, use it instantly
+                let cached = {
+                    let mut cache = precache.lock().unwrap();
+                    cache.audio.remove(sentence)
+                };
+
+                let samples = if let Some(samples) = cached {
+                    Ok(samples)
+                } else {
                     let mut model_guard = model.lock().unwrap();
                     if let Some(ref mut tts) = *model_guard {
                         tts.synthesize(sentence, Some(&voice))

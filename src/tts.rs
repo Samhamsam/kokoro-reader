@@ -14,22 +14,24 @@ fn hash_string(s: &str) -> u64 {
     hasher.finish()
 }
 
+/// Voices: (id, label). IDs starting with "piper:" use Piper TTS, others use Kokoro.
 pub const VOICES: &[(&str, &str)] = &[
-    ("af_heart", "Heart (F, US)"),
-    ("af_nova", "Nova (F, US)"),
-    ("af_sky", "Sky (F, US)"),
-    ("af_sarah", "Sarah (F, US)"),
-    ("af_bella", "Bella (F, US)"),
-    ("am_adam", "Adam (M, US)"),
-    ("am_michael", "Michael (M, US)"),
-    ("am_eric", "Eric (M, US)"),
-    ("bf_emma", "Emma (F, GB)"),
-    ("bf_alice", "Alice (F, GB)"),
-    ("bm_george", "George (M, GB)"),
-    ("bm_daniel", "Daniel (M, GB)"),
-    ("ff_siwis", "Siwis (F, FR)"),
-    ("if_sara", "Sara (F, IT)"),
-    ("jf_alpha", "Alpha (F, JA)"),
+    ("af_heart", "EN  Heart (F)"),
+    ("af_nova", "EN  Nova (F)"),
+    ("af_sky", "EN  Sky (F)"),
+    ("af_sarah", "EN  Sarah (F)"),
+    ("af_bella", "EN  Bella (F)"),
+    ("am_adam", "EN  Adam (M)"),
+    ("am_michael", "EN  Michael (M)"),
+    ("am_eric", "EN  Eric (M)"),
+    ("bf_emma", "GB  Emma (F)"),
+    ("bf_alice", "GB  Alice (F)"),
+    ("bm_george", "GB  George (M)"),
+    ("bm_daniel", "GB  Daniel (M)"),
+    ("piper:de_DE-thorsten-high", "DE  Thorsten (M)"),
+    ("ff_siwis", "FR  Siwis (F)"),
+    ("if_sara", "IT  Sara (F)"),
+    ("jf_alpha", "JA  Alpha (F)"),
 ];
 
 const SAMPLE_RATE: u32 = 24000;
@@ -203,6 +205,61 @@ struct PreCache {
     page_text_hash: u64,
 }
 
+const PIPER_VOICES_DIR: &str = ".cache/piper-voices";
+const PIPER_BASE_URL: &str = "https://huggingface.co/rhasspy/piper-voices/resolve/main";
+
+/// Get piper model paths, downloading if needed
+fn get_piper_model_paths(voice_name: &str) -> Result<(std::path::PathBuf, std::path::PathBuf), String> {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let dir = std::path::Path::new(&home).join(PIPER_VOICES_DIR);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create dir: {}", e))?;
+
+    let onnx_file = dir.join(format!("{}.onnx", voice_name));
+    let config_file = dir.join(format!("{}.onnx.json", voice_name));
+
+    // Download if not present
+    if !onnx_file.exists() || !config_file.exists() {
+        // Parse voice name to get URL path: de_DE-thorsten-high → de/de_DE/thorsten/high/
+        let parts: Vec<&str> = voice_name.split('-').collect();
+        if parts.len() >= 3 {
+            let lang_region = parts[0]; // de_DE
+            let lang = &lang_region[..2]; // de
+            let name = parts[1]; // thorsten
+            let quality = parts[2]; // high
+
+            let base = format!("{}/{}/{}/{}/{}", PIPER_BASE_URL, lang, lang_region, name, quality);
+
+            eprintln!("Downloading Piper voice {}...", voice_name);
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                if !onnx_file.exists() {
+                    let url = format!("{}/{}.onnx", base, voice_name);
+                    let bytes = reqwest::get(&url).await
+                        .map_err(|e| format!("Download failed: {}", e))?
+                        .bytes().await
+                        .map_err(|e| format!("Download failed: {}", e))?;
+                    std::fs::write(&onnx_file, &bytes)
+                        .map_err(|e| format!("Write failed: {}", e))?;
+                    eprintln!("Downloaded {}.onnx", voice_name);
+                }
+                if !config_file.exists() {
+                    let url = format!("{}/{}.onnx.json", base, voice_name);
+                    let bytes = reqwest::get(&url).await
+                        .map_err(|e| format!("Download failed: {}", e))?
+                        .bytes().await
+                        .map_err(|e| format!("Download failed: {}", e))?;
+                    std::fs::write(&config_file, &bytes)
+                        .map_err(|e| format!("Write failed: {}", e))?;
+                    eprintln!("Downloaded {}.onnx.json", voice_name);
+                }
+                Ok::<(), String>(())
+            })?;
+        }
+    }
+
+    Ok((onnx_file, config_file))
+}
+
 pub struct TtsEngine {
     state: Arc<Mutex<TtsState>>,
     sink: Arc<Mutex<Option<rodio::Sink>>>,
@@ -212,6 +269,7 @@ pub struct TtsEngine {
     sentences: Arc<Mutex<Vec<String>>>,
     model: Arc<Mutex<Option<crate::kokoro_engine::TtsEngine>>>,
     model_ready: Arc<Mutex<bool>>,
+    piper_model: Arc<Mutex<Option<piper_rs::Piper>>>,
     precache: Arc<Mutex<PreCache>>,
 }
 
@@ -243,6 +301,7 @@ impl TtsEngine {
             sentences: Arc::new(Mutex::new(vec![])),
             model: Arc::new(Mutex::new(None)),
             model_ready: Arc::new(Mutex::new(false)),
+            piper_model: Arc::new(Mutex::new(None)),
             precache: Arc::new(Mutex::new(PreCache {
                 audio: HashMap::new(),
                 page_text_hash: 0,
@@ -281,6 +340,11 @@ impl TtsEngine {
     /// Call this when a new page is rendered, before user clicks Play.
     pub fn precache_page(&self, text: &str, voice: &str) {
         if !*self.model_ready.lock().unwrap() {
+            return;
+        }
+
+        // Skip precache for Piper voices (fast enough without it)
+        if voice.starts_with("piper:") {
             return;
         }
 
@@ -386,6 +450,7 @@ impl TtsEngine {
         let playback = self.playback.clone();
         let sentences_holder = self.sentences.clone();
         let model = self.model.clone();
+        let piper_model = self.piper_model.clone();
         let precache = self.precache.clone();
 
         *stop_flag.lock().unwrap() = false;
@@ -435,23 +500,45 @@ impl TtsEngine {
                     cache.audio.remove(sentence)
                 };
 
-                let samples = if let Some(samples) = cached {
-                    Ok(samples)
+                let is_piper = voice.starts_with("piper:");
+                let samples: Result<(Vec<f32>, u32), String> = if let Some(samples) = cached {
+                    Ok((samples, SAMPLE_RATE))
+                } else if is_piper {
+                    let piper_voice = voice.strip_prefix("piper:").unwrap();
+                    // Load piper model on first use
+                    let mut piper_guard = piper_model.lock().unwrap();
+                    if piper_guard.is_none() {
+                        match get_piper_model_paths(piper_voice) {
+                            Ok((onnx, config)) => {
+                                match piper_rs::Piper::new(&onnx, &config) {
+                                    Ok(p) => { *piper_guard = Some(p); }
+                                    Err(e) => { return eprintln!("Piper init error: {:?}", e); }
+                                }
+                            }
+                            Err(e) => { return eprintln!("Piper download error: {}", e); }
+                        }
+                    }
+                    if let Some(ref mut piper) = *piper_guard {
+                        piper.create(sentence, false, None, None, None, None)
+                            .map_err(|e| format!("Piper error: {:?}", e))
+                    } else {
+                        Err("Piper not loaded".into())
+                    }
                 } else {
                     let mut model_guard = model.lock().unwrap();
                     if let Some(ref mut tts) = *model_guard {
-                        tts.synthesize(sentence, Some(&voice))
+                        tts.synthesize(sentence, Some(&voice)).map(|s| (s, SAMPLE_RATE))
                     } else {
                         Err("Model not loaded".into())
                     }
                 };
 
                 match samples {
-                    Ok(samples) => {
-                        let duration = samples.len() as f32 / SAMPLE_RATE as f32 / speed;
+                    Ok((samples, sr)) => {
+                        let duration = samples.len() as f32 / sr as f32 / speed;
                         playback.lock().unwrap().durations.push(duration);
 
-                        let source = rodio::buffer::SamplesBuffer::new(1, SAMPLE_RATE, samples);
+                        let source = rodio::buffer::SamplesBuffer::new(1, sr, samples);
                         if let Some(ref sink) = *sink_holder.lock().unwrap() {
                             sink.append(source);
                         }

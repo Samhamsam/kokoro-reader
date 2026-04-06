@@ -3,6 +3,8 @@ use crate::tts::{TtsEngine, TtsState, VOICES};
 use egui::{
     Color32, ColorImage, FontId, Pos2, Rect, RichText, Rounding, Stroke, TextureHandle, Vec2,
 };
+use std::sync::mpsc;
+use std::path::PathBuf;
 
 // -- Color Palette --
 const BG_DARK: Color32 = Color32::from_rgb(24, 24, 32);
@@ -17,8 +19,19 @@ const TEXT_PRIMARY: Color32 = Color32::from_rgb(226, 232, 240);
 const TEXT_DIM: Color32 = Color32::from_rgb(120, 130, 150);
 const HIGHLIGHT: Color32 = Color32::from_rgba_premultiplied(99, 102, 241, 50);
 
+enum RenderResult {
+    Opened {
+        render: PageRender,
+        filename: String,
+        page_count: usize,
+    },
+    Rendered(PageRender),
+    Error(String),
+}
+
 pub struct App {
     pdf: Option<PdfDoc>,
+    pdf_path: Option<PathBuf>,
     current_page: usize,
     page_texture: Option<TextureHandle>,
     page_text: String,
@@ -30,7 +43,11 @@ pub struct App {
     status_msg: String,
     needs_render: bool,
     reading_active: bool,
-    page_input: String, // text field for page number input
+    page_input: String,
+    /// Receives render results from background thread
+    render_rx: mpsc::Receiver<RenderResult>,
+    render_tx: mpsc::Sender<RenderResult>,
+    loading: bool,
 }
 
 impl App {
@@ -60,8 +77,11 @@ impl App {
         style.spacing.button_padding = Vec2::new(12.0, 6.0);
         cc.egui_ctx.set_style(style);
 
+        let (render_tx, render_rx) = mpsc::channel();
+
         let mut result = Self {
             pdf: None,
+            pdf_path: None,
             current_page: 0,
             page_texture: None,
             page_text: String::new(),
@@ -74,58 +94,79 @@ impl App {
             needs_render: false,
             reading_active: false,
             page_input: String::new(),
+            render_rx,
+            render_tx,
+            loading: false,
         };
 
         if let Some(path) = initial_pdf {
-            result.open_pdf(std::path::PathBuf::from(path));
+            result.open_pdf(PathBuf::from(path));
         }
 
         result
     }
 
-    fn open_pdf(&mut self, path: std::path::PathBuf) {
+    fn open_pdf(&mut self, path: PathBuf) {
         self.tts.stop();
         self.reading_active = false;
-        match PdfDoc::open(&path) {
-            Ok(doc) => {
-                self.status_msg = format!(
-                    "{} -- {} pages",
-                    path.file_name().unwrap_or_default().to_string_lossy(),
-                    doc.page_count()
-                );
-                self.pdf = Some(doc);
-                self.current_page = 0;
-                self.page_texture = None;
-                self.needs_render = true;
+        self.pdf = None;
+        self.page_texture = None;
+        self.loading = true;
+        self.status_msg = "Loading...".into();
+
+        let tx = self.render_tx.clone();
+        let path_clone = path.clone();
+        self.pdf_path = Some(path);
+
+        // Open and render first page in background
+        std::thread::spawn(move || {
+            match PdfDoc::open(&path_clone) {
+                Ok(pdf) => {
+                    let page_count = pdf.page_count();
+                    let filename = path_clone.file_name()
+                        .unwrap_or_default().to_string_lossy().to_string();
+                    match pdf.render_page(0, 1200) {
+                        Ok(render) => {
+                            let _ = tx.send(RenderResult::Opened { render, filename, page_count });
+                        }
+                        Err(e) => { let _ = tx.send(RenderResult::Error(format!("{}", e))); }
+                    }
+                }
+                Err(e) => { let _ = tx.send(RenderResult::Error(format!("{}", e))); }
             }
-            Err(e) => {
-                self.status_msg = format!("Error: {}", e);
-            }
+        });
+    }
+
+    fn request_render(&self, page: usize) {
+        if let Some(ref path) = self.pdf_path {
+            let tx = self.render_tx.clone();
+            let path = path.clone();
+            std::thread::spawn(move || {
+                match PdfDoc::open(&path) {
+                    Ok(pdf) => match pdf.render_page(page, 1200) {
+                        Ok(render) => { let _ = tx.send(RenderResult::Rendered(render)); }
+                        Err(e) => { let _ = tx.send(RenderResult::Error(format!("{}", e))); }
+                    }
+                    Err(e) => { let _ = tx.send(RenderResult::Error(format!("{}", e))); }
+                }
+            });
         }
     }
 
-    fn render_current_page(&mut self, ctx: &egui::Context) {
-        if let Some(ref pdf) = self.pdf {
-            match pdf.render_page(self.current_page, 1200) {
-                Ok(PageRender { rgba, width, height, text }) => {
-                    let image = ColorImage::from_rgba_unmultiplied([width, height], &rgba);
-                    self.page_texture = Some(ctx.load_texture(
-                        format!("page-{}", self.current_page),
-                        image,
-                        Default::default(),
-                    ));
-                    self.page_text = text;
-                    self.page_img_size = (width, height);
-                    // Pre-synthesize first sentences so Play is instant
-                    let voice = VOICES[self.selected_voice].0;
-                    self.tts.precache_page(&self.page_text, voice);
-                }
-                Err(e) => {
-                    self.status_msg = format!("Render error: {}", e);
-                }
-            }
-        }
-        self.needs_render = false;
+    fn apply_render(&mut self, render: PageRender, ctx: &egui::Context) {
+        let PageRender { rgba, width, height, text } = render;
+        let image = ColorImage::from_rgba_unmultiplied([width, height], &rgba);
+        self.page_texture = Some(ctx.load_texture(
+            format!("page-{}", self.current_page),
+            image,
+            Default::default(),
+        ));
+        self.page_text = text;
+        self.page_img_size = (width, height);
+        self.loading = false;
+        // Pre-synthesize first sentences
+        let voice = VOICES[self.selected_voice].0;
+        self.tts.precache_page(&self.page_text, voice);
     }
 
     fn go_to_page(&mut self, page: usize) {
@@ -133,7 +174,8 @@ impl App {
             if page < pdf.page_count() {
                 self.current_page = page;
                 self.page_texture = None;
-                self.needs_render = true;
+                self.loading = true;
+                self.request_render(page);
             }
         }
     }
@@ -168,7 +210,44 @@ fn styled_button(ui: &mut egui::Ui, label: &str, color: Color32) -> egui::Respon
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Auto-advance
+        // Process background render results
+        while let Ok(result) = self.render_rx.try_recv() {
+            match result {
+                RenderResult::Opened { render, filename, page_count } => {
+                    self.status_msg = format!("{} -- {} pages", filename, page_count);
+                    // Open PdfDoc on main thread (needed for highlighting, not Send)
+                    if let Some(ref path) = self.pdf_path {
+                        if let Ok(pdf) = PdfDoc::open(path) {
+                            self.pdf = Some(pdf);
+                        }
+                    }
+                    self.current_page = 0;
+                    self.apply_render(render, ctx);
+                }
+                RenderResult::Rendered(render) => {
+                    self.apply_render(render, ctx);
+                    // Auto-start reading if we were reading
+                    if self.reading_active {
+                        if !self.page_text.trim().is_empty() {
+                            self.start_reading();
+                        } else {
+                            let page_count = self.pdf.as_ref().map_or(0, |p| p.page_count());
+                            if self.current_page + 1 < page_count {
+                                self.go_to_page(self.current_page + 1);
+                            } else {
+                                self.reading_active = false;
+                            }
+                        }
+                    }
+                }
+                RenderResult::Error(e) => {
+                    self.status_msg = format!("Error: {}", e);
+                    self.loading = false;
+                }
+            }
+        }
+
+        // Auto-advance when TTS finished
         if self.tts.state() == TtsState::Finished {
             self.tts.clear_finished();
             if self.reading_active {
@@ -181,20 +260,9 @@ impl eframe::App for App {
             }
         }
 
-        if self.needs_render {
-            self.render_current_page(ctx);
-            if self.reading_active {
-                if !self.page_text.trim().is_empty() {
-                    self.start_reading();
-                } else {
-                    let page_count = self.pdf.as_ref().map_or(0, |p| p.page_count());
-                    if self.current_page + 1 < page_count {
-                        self.go_to_page(self.current_page + 1);
-                    } else {
-                        self.reading_active = false;
-                    }
-                }
-            }
+        // Keep repainting while loading
+        if self.loading {
+            ctx.request_repaint();
         }
 
         // ── Top toolbar ──

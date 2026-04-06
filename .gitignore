@@ -1,0 +1,5 @@
+/target
+/lib
+*.wav
+*.mp3
+.venv/

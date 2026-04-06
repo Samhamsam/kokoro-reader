@@ -1,0 +1,19 @@
+[package]
+name = "kokoro-reader"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+eframe = "0.31"
+egui = "0.31"
+pdfium-render = "0.8"
+rodio = "0.21"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+espeak-rs = "0.1.9"
+ndarray = "0.16"
+ndarray-npy = "0.9"
+ort = { version = "2.0.0-rc.12" }
+reqwest = { version = "0.12", features = ["blocking"] }
+serde_json = "1.0"
+rfd = "0.15"
+hound = "3.5"

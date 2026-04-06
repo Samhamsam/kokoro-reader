@@ -114,10 +114,10 @@ impl TtsEngine {
     }
 
     fn tokenize(&self, phonemes: &str) -> Vec<Vec<i64>> {
-        let tokens: Vec<i64> = phonemes
-            .chars()
-            .filter_map(|c| self.vocab.get(&c).copied())
-            .collect();
+        let mut tokens: Vec<i64> = Vec::with_capacity(phonemes.len() + 2);
+        tokens.push(0); // BOS padding token
+        tokens.extend(phonemes.chars().filter_map(|c| self.vocab.get(&c).copied()));
+        tokens.push(0); // EOS padding token
         vec![tokens]
     }
 

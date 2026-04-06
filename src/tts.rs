@@ -1,6 +1,7 @@
 use std::io::Cursor;
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use hound;
 use rodio;
@@ -25,18 +26,25 @@ pub const VOICES: &[(&str, &str)] = &[
 
 const SAMPLE_RATE: u32 = 24000;
 
-/// Clean PDF text: remove control chars, collapse whitespace
 fn clean_text(text: &str) -> String {
     text.chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
+        .map(|c| {
+            if c.is_control() {
+                ' '
+            } else if "♦♣♠♥★☆●○◆◇■□▪▫▲△▼▽•‣⁃※†‡§¶".contains(c) {
+                // Replace decorative/bullet symbols with space
+                ' '
+            } else {
+                c
+            }
+        })
         .collect::<String>()
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
 }
 
-/// Split text into sentences at natural boundaries
-fn split_into_sentences(text: &str) -> Vec<String> {
+pub fn split_into_sentences(text: &str) -> Vec<String> {
     let text = clean_text(text);
     if text.is_empty() {
         return vec![];
@@ -47,16 +55,13 @@ fn split_into_sentences(text: &str) -> Vec<String> {
 
     for ch in text.chars() {
         current.push(ch);
-        if (ch == '.' || ch == '!' || ch == '?' || ch == ';')
-            && current.len() > 5
-        {
+        if ch == '.' || ch == '!' || ch == '?' || ch == ';' || ch == ':' {
             let trimmed = current.trim().to_string();
             if !trimmed.is_empty() {
                 sentences.push(trimmed);
             }
             current.clear();
         }
-        // Force split at ~400 chars if no sentence boundary found
         if current.len() > 400 {
             if let Some(pos) = current.rfind(' ') {
                 let (left, right) = current.split_at(pos);
@@ -72,48 +77,15 @@ fn split_into_sentences(text: &str) -> Vec<String> {
     if !trimmed.is_empty() {
         sentences.push(trimmed);
     }
+    sentences.retain(|s| has_speakable_words(s));
     sentences
 }
 
-/// Audio compressor — evens out volume so quiet words become audible
-/// and loud peaks are tamed. Same principle as broadcast radio.
-fn compress_audio(samples: &mut [f32]) {
-    if samples.is_empty() {
-        return;
-    }
-
-    let threshold = 0.15;   // start compressing above this level
-    let ratio = 4.0;        // 4:1 compression ratio
-    let attack = 0.002;     // 2ms attack (fast, catches transients)
-    let release = 0.05;     // 50ms release (smooth decay)
-    let makeup_gain = 2.5;  // boost everything up after compression
-
-    let attack_coeff = 1.0 - (-1.0 / (SAMPLE_RATE as f32 * attack)).exp();
-    let release_coeff = 1.0 - (-1.0 / (SAMPLE_RATE as f32 * release)).exp();
-
-    let mut envelope = 0.0f32;
-
-    for sample in samples.iter_mut() {
-        let abs = sample.abs();
-
-        // Envelope follower: fast attack, slow release
-        if abs > envelope {
-            envelope += attack_coeff * (abs - envelope);
-        } else {
-            envelope += release_coeff * (abs - envelope);
-        }
-
-        // Compute gain reduction
-        let gain = if envelope > threshold {
-            let over = envelope / threshold;
-            let compressed = over.powf(1.0 / ratio);
-            (threshold * compressed) / envelope
-        } else {
-            1.0
-        };
-
-        *sample = (*sample * gain * makeup_gain).clamp(-0.95, 0.95);
-    }
+/// Returns true if the string contains at least one real word (letters).
+/// Filters out dividers, page numbers, bullet points, etc.
+fn has_speakable_words(s: &str) -> bool {
+    let letter_count = s.chars().filter(|c| c.is_alphabetic()).count();
+    letter_count >= 2
 }
 
 fn samples_to_wav(samples: &[f32]) -> Vec<u8> {
@@ -138,10 +110,20 @@ fn samples_to_wav(samples: &[f32]) -> Vec<u8> {
 #[derive(Clone, PartialEq)]
 pub enum TtsState {
     Idle,
+    Loading,    // model loading
     Generating,
     Playing,
     Paused,
+    Finished,
     Error(String),
+}
+
+struct PlaybackInfo {
+    generating_idx: usize,
+    playing_idx: usize,
+    total: usize,
+    durations: Vec<f32>,
+    play_start: Option<Instant>,
 }
 
 pub struct TtsEngine {
@@ -149,7 +131,11 @@ pub struct TtsEngine {
     sink: Arc<Mutex<Option<rodio::Sink>>>,
     _stream: Arc<Mutex<Option<rodio::OutputStream>>>,
     stop_flag: Arc<Mutex<bool>>,
-    progress: Arc<Mutex<(usize, usize)>>, // (current_sentence, total_sentences)
+    playback: Arc<Mutex<PlaybackInfo>>,
+    sentences: Arc<Mutex<Vec<String>>>,
+    /// Persistent Kokoro model — loaded once, reused across pages
+    model: Arc<Mutex<Option<crate::kokoro_engine::TtsEngine>>>,
+    model_ready: Arc<Mutex<bool>>,
 }
 
 impl TtsEngine {
@@ -157,130 +143,196 @@ impl TtsEngine {
         let stream = rodio::OutputStreamBuilder::open_default_stream()
             .expect("Failed to open audio output");
 
-        Self {
-            state: Arc::new(Mutex::new(TtsState::Idle)),
+        // Warm up the audio pipeline so PulseAudio is fully initialized
+        {
+            let warmup = rodio::Sink::connect_new(stream.mixer());
+            let silence = rodio::buffer::SamplesBuffer::new(1, SAMPLE_RATE, vec![0.0f32; SAMPLE_RATE as usize / 10]);
+            warmup.append(silence);
+            warmup.sleep_until_end();
+        }
+
+        let engine = Self {
+            state: Arc::new(Mutex::new(TtsState::Loading)),
             sink: Arc::new(Mutex::new(None)),
             _stream: Arc::new(Mutex::new(Some(stream))),
             stop_flag: Arc::new(Mutex::new(false)),
-            progress: Arc::new(Mutex::new((0, 0))),
-        }
+            playback: Arc::new(Mutex::new(PlaybackInfo {
+                generating_idx: 0,
+                playing_idx: 0,
+                total: 0,
+                durations: vec![],
+                play_start: None,
+            })),
+            sentences: Arc::new(Mutex::new(vec![])),
+            model: Arc::new(Mutex::new(None)),
+            model_ready: Arc::new(Mutex::new(false)),
+        };
+
+        // Pre-load the Kokoro model in background on startup
+        let model = engine.model.clone();
+        let model_ready = engine.model_ready.clone();
+        let state = engine.state.clone();
+        thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                match crate::kokoro_engine::TtsEngine::new().await {
+                    Ok(tts) => {
+                        *model.lock().unwrap() = Some(tts);
+                        *model_ready.lock().unwrap() = true;
+                        *state.lock().unwrap() = TtsState::Idle;
+                        eprintln!("Kokoro model loaded and ready.");
+                    }
+                    Err(e) => {
+                        *state.lock().unwrap() = TtsState::Error(format!("Model load: {}", e));
+                    }
+                }
+            });
+        });
+
+        engine
     }
 
     pub fn state(&self) -> TtsState {
         self.state.lock().unwrap().clone()
     }
 
-    pub fn progress(&self) -> (usize, usize) {
-        *self.progress.lock().unwrap()
+    pub fn progress(&self) -> (usize, usize, usize) {
+        let pb = self.playback.lock().unwrap();
+        (pb.generating_idx, pb.playing_idx + 1, pb.total)
+    }
+
+    pub fn current_sentences(&self) -> (Vec<String>, usize) {
+        let sents = self.sentences.lock().unwrap().clone();
+        let playing = self.playback.lock().unwrap().playing_idx;
+        (sents, playing)
+    }
+
+    fn update_playing_index(playback: &Arc<Mutex<PlaybackInfo>>) {
+        let mut pb = playback.lock().unwrap();
+        if pb.durations.is_empty() || pb.play_start.is_none() {
+            return;
+        }
+        let elapsed = pb.play_start.unwrap().elapsed().as_secs_f32();
+        let mut cumulative = 0.0f32;
+        for (i, &dur) in pb.durations.iter().enumerate() {
+            cumulative += dur;
+            if elapsed < cumulative {
+                pb.playing_idx = i;
+                return;
+            }
+        }
+        pb.playing_idx = pb.durations.len().saturating_sub(1);
     }
 
     pub fn speak(&self, text: String, voice: String, speed: f32) {
         self.stop();
 
+        if !*self.model_ready.lock().unwrap() {
+            *self.state.lock().unwrap() = TtsState::Error("Model still loading...".into());
+            return;
+        }
+
         let state = self.state.clone();
         let sink_holder = self.sink.clone();
         let stream_holder = self._stream.clone();
         let stop_flag = self.stop_flag.clone();
-        let progress = self.progress.clone();
+        let playback = self.playback.clone();
+        let sentences_holder = self.sentences.clone();
+        let model = self.model.clone();
 
         *stop_flag.lock().unwrap() = false;
         *state.lock().unwrap() = TtsState::Generating;
-        *progress.lock().unwrap() = (0, 0);
 
         thread::spawn(move || {
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            rt.block_on(async {
-                let tts = match crate::kokoro_engine::TtsEngine::new().await {
-                    Ok(t) => t,
-                    Err(e) => {
-                        *state.lock().unwrap() = TtsState::Error(e);
-                        return;
-                    }
-                };
-                let tts = Arc::new(Mutex::new(tts));
+            let sentences = split_into_sentences(&text);
+            if sentences.is_empty() {
+                *state.lock().unwrap() = TtsState::Finished;
+                return;
+            }
 
-                let sentences = split_into_sentences(&text);
-                if sentences.is_empty() {
-                    *state.lock().unwrap() = TtsState::Error("No text to speak".into());
+            let total = sentences.len();
+            *sentences_holder.lock().unwrap() = sentences.clone();
+            {
+                let mut pb = playback.lock().unwrap();
+                pb.generating_idx = 0;
+                pb.playing_idx = 0;
+                pb.total = total;
+                pb.durations.clear();
+                pb.play_start = None;
+            }
+
+            let stream_guard = stream_holder.lock().unwrap();
+            let stream_ref = match stream_guard.as_ref() {
+                Some(s) => s,
+                None => {
+                    *state.lock().unwrap() = TtsState::Error("No audio device".into());
                     return;
                 }
+            };
+            let sink = rodio::Sink::connect_new(stream_ref.mixer());
+            sink.set_speed(speed);
 
-                let total = sentences.len();
-                *progress.lock().unwrap() = (0, total);
+            for (i, sentence) in sentences.iter().enumerate() {
+                if *stop_flag.lock().unwrap() {
+                    break;
+                }
 
-                // Create sink for queued playback
-                let stream_guard = stream_holder.lock().unwrap();
-                let stream_ref = match stream_guard.as_ref() {
-                    Some(s) => s,
-                    None => {
-                        *state.lock().unwrap() = TtsState::Error("No audio device".into());
-                        return;
+                playback.lock().unwrap().generating_idx = i + 1;
+
+                let samples = {
+                    let mut model_guard = model.lock().unwrap();
+                    if let Some(ref mut tts) = *model_guard {
+                        tts.synthesize(sentence, Some(&voice))
+                    } else {
+                        Err("Model not loaded".into())
                     }
                 };
-                let sink = rodio::Sink::connect_new(stream_ref.mixer());
-                sink.set_speed(speed);
 
-                // Stream: synthesize each sentence and append to sink queue
-                for (i, sentence) in sentences.iter().enumerate() {
-                    if *stop_flag.lock().unwrap() {
-                        break;
-                    }
+                match samples {
+                    Ok(samples) => {
+                        let duration = samples.len() as f32 / SAMPLE_RATE as f32 / speed;
+                        playback.lock().unwrap().durations.push(duration);
 
-                    *progress.lock().unwrap() = (i + 1, total);
-
-                    // First sentence: show "Generating", after that "Playing"
-                    if i == 0 {
-                        *state.lock().unwrap() = TtsState::Generating;
-                    }
-
-                    let samples = {
-                        let mut tts_guard = tts.lock().unwrap();
-                        tts_guard.synthesize(sentence, Some(&voice))
-                    };
-
-                    match samples {
-                        Ok(mut samples) => {
-                            compress_audio(&mut samples);
-                            let wav_data = samples_to_wav(&samples);
-                            let cursor = Cursor::new(wav_data);
-                            if let Ok(source) = rodio::Decoder::new(cursor) {
-                                sink.append(source);
-                                // After first sentence is queued, we're "playing"
-                                if i == 0 {
-                                    *state.lock().unwrap() = TtsState::Playing;
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("Sentence {}/{} error (skipping): {}", i + 1, total, e);
+                        // Feed raw PCM samples directly — no WAV encode/decode overhead,
+                        // no gaps between sentences
+                        let source = rodio::buffer::SamplesBuffer::new(1, SAMPLE_RATE, samples);
+                        sink.append(source);
+                        if i == 0 {
+                            playback.lock().unwrap().play_start = Some(Instant::now());
+                            *state.lock().unwrap() = TtsState::Playing;
                         }
                     }
-                }
-
-                // Store sink so pause/stop work
-                *sink_holder.lock().unwrap() = Some(sink);
-
-                // Wait for playback to finish (unless stopped)
-                loop {
-                    if *stop_flag.lock().unwrap() {
-                        break;
+                    Err(e) => {
+                        playback.lock().unwrap().durations.push(0.0);
+                        eprintln!("Sentence {}/{} error: {}", i + 1, total, e);
                     }
-                    let empty = sink_holder
-                        .lock()
-                        .unwrap()
-                        .as_ref()
-                        .is_some_and(|s| s.empty());
-                    if empty {
-                        break;
-                    }
-                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                 }
+            }
 
-                if !*stop_flag.lock().unwrap() {
-                    sink_holder.lock().unwrap().take();
-                    *state.lock().unwrap() = TtsState::Idle;
+            *sink_holder.lock().unwrap() = Some(sink);
+
+            // Wait for playback to finish
+            loop {
+                if *stop_flag.lock().unwrap() {
+                    break;
                 }
-            });
+                Self::update_playing_index(&playback);
+
+                let empty = sink_holder
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .is_some_and(|s| s.empty());
+                if empty {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+
+            if !*stop_flag.lock().unwrap() {
+                sink_holder.lock().unwrap().take();
+                *state.lock().unwrap() = TtsState::Finished;
+            }
         });
     }
 
@@ -309,6 +361,13 @@ impl TtsEngine {
     pub fn set_speed(&self, speed: f32) {
         if let Some(sink) = self.sink.lock().unwrap().as_ref() {
             sink.set_speed(speed);
+        }
+    }
+
+    pub fn clear_finished(&self) {
+        let mut s = self.state.lock().unwrap();
+        if *s == TtsState::Finished {
+            *s = TtsState::Idle;
         }
     }
 }

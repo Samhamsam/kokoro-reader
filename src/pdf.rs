@@ -82,11 +82,12 @@ impl PdfDoc {
     }
 
     /// Find bounding rectangles for a sentence on the page, in image pixel coordinates.
-    /// Returns line-level rects (merged per line) for the sentence text.
+    /// Uses the start of current sentence and start of next sentence to determine exact bounds.
     pub fn find_sentence_rects(
         &self,
         page_index: usize,
         sentence: &str,
+        next_sentence: Option<&str>,
         image_width: usize,
         image_height: usize,
     ) -> Vec<PixelRect> {
@@ -109,37 +110,33 @@ impl PdfDoc {
             Err(_) => return vec![],
         };
 
-        // Search for the first few words to find where the sentence starts
+        // Find where this sentence starts
         let search_prefix: String = sentence.chars().take(40).collect();
         let search_prefix = search_prefix.trim();
         if search_prefix.is_empty() {
             return vec![];
         }
 
-        let search = match page_text.search(search_prefix, &PdfSearchOptions::new()) {
-            Ok(s) => s,
-            Err(_) => return vec![],
-        };
-        let found_segments = match search.find_next() {
-            Some(segs) => segs,
+        let start_char_idx = match find_text_start(&page_text, search_prefix) {
+            Some(idx) => idx,
             None => return vec![],
         };
 
-        // Get the starting character index from the search result
-        let start_char_idx = match found_segments.iter().next() {
-            Some(seg) => match seg.chars() {
-                Ok(chars) => chars.first_char_index().unwrap_or(0),
-                Err(_) => return vec![],
-            },
-            None => return vec![],
-        };
-
-        // Now get rects for the full sentence length using the chars collection
+        // Find where the next sentence starts — that's our end boundary
         let all_chars = page_text.chars();
-
-        // Sentence length + padding (PDF text may have slightly different whitespace)
-        let sentence_char_count = sentence.chars().count() + 5;
-        let end_char_idx = (start_char_idx + sentence_char_count).min(all_chars.len());
+        let end_char_idx = if let Some(next) = next_sentence {
+            let next_prefix: String = next.chars().take(40).collect();
+            let next_prefix = next_prefix.trim();
+            if !next_prefix.is_empty() {
+                find_text_start(&page_text, next_prefix)
+                    .unwrap_or(all_chars.len())
+            } else {
+                all_chars.len()
+            }
+        } else {
+            // Last sentence — go to end of page
+            all_chars.len()
+        };
 
         let mut rects = Vec::new();
         for i in start_char_idx..end_char_idx {
@@ -166,6 +163,15 @@ impl PdfDoc {
         // Merge character rects into line-level rects (same y ± tolerance)
         merge_rects_by_line(&rects)
     }
+}
+
+/// Find the starting character index of a text snippet on the page
+fn find_text_start(page_text: &PdfPageText, text: &str) -> Option<usize> {
+    let search = page_text.search(text, &PdfSearchOptions::new()).ok()?;
+    let segments = search.find_next()?;
+    let seg = segments.iter().next()?;
+    let chars = seg.chars().ok()?;
+    chars.first_char_index()
 }
 
 /// Merge individual character rects into line-level rects

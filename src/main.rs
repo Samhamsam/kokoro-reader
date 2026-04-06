@@ -4,6 +4,8 @@ mod pdf;
 mod tts;
 
 fn main() -> eframe::Result {
+    let pdf_path = std::env::args().nth(1);
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1000.0, 750.0])
@@ -14,6 +16,6 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "Kokoro Reader",
         options,
-        Box::new(|cc| Ok(Box::new(app::App::new(cc)))),
+        Box::new(move |cc| Ok(Box::new(app::App::new(cc, pdf_path)))),
     )
 }

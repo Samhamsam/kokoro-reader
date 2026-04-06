@@ -44,6 +44,49 @@ fn clean_text(text: &str) -> String {
         .join(" ")
 }
 
+const ABBREVIATIONS: &[&str] = &[
+    "Mr.", "Mrs.", "Ms.", "Dr.", "Prof.", "Sr.", "Jr.", "St.", "Mt.",
+    "Rev.", "Gen.", "Gov.", "Sgt.", "Cpl.", "Pvt.", "Lt.", "Col.", "Capt.",
+    "Corp.", "Inc.", "Ltd.", "Co.", "vs.", "etc.", "approx.", "dept.",
+    "est.", "vol.", "no.", "fig.", "Jan.", "Feb.", "Mar.", "Apr.",
+    "Jun.", "Jul.", "Aug.", "Sep.", "Oct.", "Nov.", "Dec.",
+    "i.e.", "e.g.", "U.S.", "U.K.", "U.N.", "a.m.", "p.m.",
+];
+
+/// Check if the period at the end of `text` is an abbreviation, not a sentence end.
+fn is_abbreviation(text: &str) -> bool {
+    let text = text.trim_end();
+    if !text.ends_with('.') {
+        return false;
+    }
+
+    // Single uppercase letter followed by dot: "D.", "J.", "F."
+    let chars: Vec<char> = text.chars().collect();
+    let len = chars.len();
+    if len >= 2 {
+        let before_dot = chars[len - 2];
+        if before_dot.is_uppercase() {
+            // Check it's a standalone initial: preceded by space/start or another initial
+            if len == 2 {
+                return true; // just "D."
+            }
+            let before_letter = chars[len - 3];
+            if before_letter == ' ' || before_letter == '.' {
+                return true; // " D." or "J.D."
+            }
+        }
+    }
+
+    // Known abbreviations
+    for abbr in ABBREVIATIONS {
+        if text.ends_with(abbr) {
+            return true;
+        }
+    }
+
+    false
+}
+
 pub fn split_into_sentences(text: &str) -> Vec<String> {
     let text = clean_text(text);
     if text.is_empty() {
@@ -55,12 +98,30 @@ pub fn split_into_sentences(text: &str) -> Vec<String> {
 
     for ch in text.chars() {
         current.push(ch);
-        if ch == '.' || ch == '!' || ch == '?' || ch == ';' || ch == ':' {
+        if ch == '!' || ch == '?' || ch == ';' {
             let trimmed = current.trim().to_string();
             if !trimmed.is_empty() {
                 sentences.push(trimmed);
             }
             current.clear();
+        } else if ch == '.' {
+            if !is_abbreviation(&current) {
+                let trimmed = current.trim().to_string();
+                if !trimmed.is_empty() {
+                    sentences.push(trimmed);
+                }
+                current.clear();
+            }
+        } else if ch == ':' {
+            // Only split on colon if followed by enough text (avoid "Chapter 1:")
+            // We'll split at colon only if current is long enough
+            if current.len() > 50 {
+                let trimmed = current.trim().to_string();
+                if !trimmed.is_empty() {
+                    sentences.push(trimmed);
+                }
+                current.clear();
+            }
         }
         if current.len() > 400 {
             if let Some(pos) = current.rfind(' ') {
@@ -202,6 +263,8 @@ impl TtsEngine {
     }
 
     pub fn current_sentences(&self) -> (Vec<String>, usize) {
+        // Always update playing index based on elapsed time before returning
+        Self::update_playing_index(&self.playback);
         let sents = self.sentences.lock().unwrap().clone();
         let playing = self.playback.lock().unwrap().playing_idx;
         (sents, playing)
@@ -271,6 +334,8 @@ impl TtsEngine {
             };
             let sink = rodio::Sink::connect_new(stream_ref.mixer());
             sink.set_speed(speed);
+            // Store sink immediately so pause/stop work during generation
+            *sink_holder.lock().unwrap() = Some(sink);
 
             for (i, sentence) in sentences.iter().enumerate() {
                 if *stop_flag.lock().unwrap() {
@@ -293,10 +358,10 @@ impl TtsEngine {
                         let duration = samples.len() as f32 / SAMPLE_RATE as f32 / speed;
                         playback.lock().unwrap().durations.push(duration);
 
-                        // Feed raw PCM samples directly — no WAV encode/decode overhead,
-                        // no gaps between sentences
                         let source = rodio::buffer::SamplesBuffer::new(1, SAMPLE_RATE, samples);
-                        sink.append(source);
+                        if let Some(ref sink) = *sink_holder.lock().unwrap() {
+                            sink.append(source);
+                        }
                         if i == 0 {
                             playback.lock().unwrap().play_start = Some(Instant::now());
                             *state.lock().unwrap() = TtsState::Playing;
@@ -308,8 +373,6 @@ impl TtsEngine {
                     }
                 }
             }
-
-            *sink_holder.lock().unwrap() = Some(sink);
 
             // Wait for playback to finish
             loop {

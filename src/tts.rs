@@ -8,6 +8,31 @@ use std::time::{Duration, Instant};
 use hound;
 use rodio;
 
+/// Phonemize text for Piper with NFD Unicode normalization.
+/// The official Piper C++ uses NFD-normalized IPA phonemes.
+/// Without this, characters like ç (German "ch") are not recognized by the model.
+fn piper_phonemize(text: &str, voice_name: &str) -> String {
+    use unicode_normalization::UnicodeNormalization;
+
+    // Derive espeak voice from piper voice name: de_DE-thorsten-high → de
+    let espeak_voice = if voice_name.starts_with("de_DE") {
+        "de"
+    } else if voice_name.starts_with("en_") {
+        "en"
+    } else if voice_name.starts_with("fr_") {
+        "fr"
+    } else {
+        &voice_name[..2]
+    };
+
+    let phonemes = espeak_rs::text_to_phonemes(text, espeak_voice, None, false, false)
+        .unwrap_or_default();
+    let ipa = phonemes.join(" ");
+
+    // NFD normalize — decomposes ç into c + combining cedilla, etc.
+    ipa.nfd().collect::<String>()
+}
+
 fn hash_string(s: &str) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     s.hash(&mut hasher);
@@ -519,7 +544,9 @@ impl TtsEngine {
                         }
                     }
                     if let Some(ref mut piper) = *piper_guard {
-                        piper.create(sentence, false, None, None, None, None)
+                        // Phonemize ourselves with NFD normalization (matching official Piper)
+                        let phonemes = piper_phonemize(sentence, piper_voice);
+                        piper.create(&phonemes, true, None, None, None, None)
                             .map_err(|e| format!("Piper error: {:?}", e))
                     } else {
                         Err("Piper not loaded".into())

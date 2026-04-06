@@ -18,3 +18,4 @@ serde_json = "1.0"
 rfd = "0.15"
 hound = "3.5"
 piper-rs = { git = "https://github.com/thewh1teagle/piper-rs", branch = "main" }
+unicode-normalization = "0.1"

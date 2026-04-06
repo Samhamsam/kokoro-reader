@@ -142,6 +142,20 @@ impl App {
         let voice = VOICES[self.selected_voice].0.to_string();
         self.tts.speak(self.page_text.clone(), voice, self.speed);
         self.reading_active = true;
+        // Pre-cache the NEXT page so the transition is instant
+        self.precache_next_page();
+    }
+
+    fn precache_next_page(&self) {
+        let next_page = self.current_page + 1;
+        if let Some(ref pdf) = self.pdf {
+            if next_page < pdf.page_count() {
+                if let Ok(text) = pdf.page_text(next_page) {
+                    let voice = VOICES[self.selected_voice].0;
+                    self.tts.precache_page(&text, voice);
+                }
+            }
+        }
     }
 }
 

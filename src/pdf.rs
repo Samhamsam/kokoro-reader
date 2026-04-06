@@ -52,6 +52,13 @@ impl PdfDoc {
         self.page_count
     }
 
+    /// Extract only text from a page (no rendering — fast)
+    pub fn page_text(&self, index: usize) -> Result<String, PdfiumError> {
+        let doc = self.pdfium.load_pdf_from_byte_slice(&self.doc_bytes, None)?;
+        let page = doc.pages().get(index as u16)?;
+        Ok(page.text().map(|t| t.all()).unwrap_or_default())
+    }
+
     pub fn render_page(
         &self,
         index: usize,

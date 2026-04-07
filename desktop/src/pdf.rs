@@ -25,15 +25,37 @@ pub struct PixelRect {
 
 impl PdfDoc {
     pub fn open(path: &Path) -> Result<Self, PdfiumError> {
-        let lib_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("lib/lib");
-        let pdfium = Pdfium::new(
-            Pdfium::bind_to_library(
-                Pdfium::pdfium_platform_library_name_at_path(
-                    lib_path.to_str().unwrap_or("./lib/lib"),
-                ),
-            )
-            .or_else(|_| Pdfium::bind_to_system_library())?,
-        );
+        let search_paths = [
+            // Next to executable (installed via make install)
+            std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|d| d.to_path_buf())),
+            // /usr/local/lib (make install default)
+            Some(Path::new("/usr/local/lib").to_path_buf()),
+            // Compile-time path (cargo build / dev)
+            Some(Path::new(env!("CARGO_MANIFEST_DIR")).join("lib/lib")),
+        ];
+
+        let mut last_err = None;
+        let mut binding = None;
+
+        for dir in search_paths.iter().filter_map(|p| p.as_ref()) {
+            match Pdfium::bind_to_library(
+                Pdfium::pdfium_platform_library_name_at_path(dir.to_str().unwrap_or(".")),
+            ) {
+                Ok(b) => { binding = Some(b); break; }
+                Err(e) => { last_err = Some(e); }
+            }
+        }
+
+        if binding.is_none() {
+            match Pdfium::bind_to_system_library() {
+                Ok(b) => { binding = Some(b); }
+                Err(e) => { last_err = Some(e); }
+            }
+        }
+
+        let pdfium = Pdfium::new(binding.ok_or(last_err.unwrap())?);
 
         let doc_bytes = std::fs::read(path).map_err(|e| PdfiumError::IoError(e))?;
         let page_count = {

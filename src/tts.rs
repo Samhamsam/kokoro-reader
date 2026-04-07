@@ -8,7 +8,18 @@ use rodio;
 // ── Text preprocessing for natural TTS pauses ──
 
 fn prepare_for_tts(text: &str) -> String {
-    let mut result = text.to_string();
+    // Remove page numbers (standalone numbers, typically at start/end of page)
+    let lines: Vec<&str> = text.lines().collect();
+    let filtered: Vec<&str> = lines.into_iter().filter(|line| {
+        let trimmed = line.trim();
+        // Skip lines that are just a number (page number)
+        if trimmed.parse::<u32>().is_ok() { return false; }
+        // Skip lines like "- 42 -" or "—42—"
+        let stripped = trimmed.replace('-', "").replace('—', "").trim().to_string();
+        if !stripped.is_empty() && stripped.parse::<u32>().is_ok() { return false; }
+        true
+    }).collect();
+    let mut result = filtered.join(" ");
     // Add comma pause before opening parenthesis/bracket
     result = result.replace(" (", ", (");
     result = result.replace(" [", ", [");

@@ -178,7 +178,15 @@ class TtsEngine(context: Context) {
 
     companion object {
         private fun prepareForTts(text: String): String {
-            return text
+            // Remove page numbers (standalone numbers on their own line)
+            val filtered = text.lines().filter { line ->
+                val trimmed = line.trim()
+                if (trimmed.toIntOrNull() != null) return@filter false
+                val stripped = trimmed.replace("-", "").replace("—", "").trim()
+                if (stripped.isNotEmpty() && stripped.toIntOrNull() != null) return@filter false
+                true
+            }.joinToString(" ")
+            return filtered
                 .replace(" (", ", (").replace(" [", ", [")
                 .replace(") ", "), ").replace("] ", "], ")
                 .replace(" — ", ", — ").replace(" – ", ", – ").replace(" - ", ", — ")

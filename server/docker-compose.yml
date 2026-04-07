@@ -6,6 +6,8 @@ services:
     volumes:
       - kokoro-models:/app/models-tts
       - kokoro-data:/app/data
+    environment:
+      - GROQ_API_KEY=${GROQ_API_KEY:-}
     restart: unless-stopped
 
 volumes:

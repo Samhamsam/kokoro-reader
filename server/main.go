@@ -45,6 +45,7 @@ func main() {
 	// Handlers
 	bookHandler := &handlers.BookHandler{DB: database, BooksDir: filepath.Join(dataDir, "books")}
 	ttsHandler := &handlers.TTSHandler{Engine: engine}
+	summaryHandler := &handlers.SummaryHandler{DB: database, BooksDir: filepath.Join(dataDir, "books"), APIKey: os.Getenv("GROQ_API_KEY")}
 
 	// Startup cleanup
 	bookHandler.CleanupOrphanedFiles()
@@ -77,6 +78,8 @@ func main() {
 		switch {
 		case sub == "file" && r.Method == http.MethodGet:
 			bookHandler.GetFile(w, r, id)
+		case sub == "summary" && r.Method == http.MethodPost:
+			summaryHandler.Summarize(w, r, id)
 		case sub == "progress" && r.Method == http.MethodPut:
 			bookHandler.UpdateProgress(w, r, id)
 		case sub == "" && r.Method == http.MethodGet:

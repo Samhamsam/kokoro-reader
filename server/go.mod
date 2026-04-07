@@ -17,6 +17,7 @@ require (
 	github.com/k2-fsa/sherpa-onnx-go-linux v1.12.35 // indirect
 	github.com/k2-fsa/sherpa-onnx-go-macos v1.12.35 // indirect
 	github.com/k2-fsa/sherpa-onnx-go-windows v1.12.35 // indirect
+	github.com/ledongthuc/pdf v0.0.0-20250511090121-5959a4027728 // indirect
 	github.com/mattn/go-runewidth v0.0.19 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	golang.org/x/crypto v0.43.0 // indirect

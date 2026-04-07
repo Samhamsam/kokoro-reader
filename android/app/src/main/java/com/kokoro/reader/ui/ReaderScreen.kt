@@ -33,7 +33,7 @@ fun ReaderScreen(
     onBack: () -> Unit
 ) {
     val book = library.books.find { it.id == bookId } ?: run { onBack(); return }
-    val pdfFile = library.getBookPath(book)
+    val pdfFile = library.getBookFile(book.id)
 
     var currentPage by remember { mutableIntStateOf(book.last_page) }
     var totalPages by remember { mutableIntStateOf(book.total_pages) }

@@ -8,7 +8,7 @@ eframe = "0.31"
 egui = "0.31"
 pdfium-render = "0.8"
 rodio = "0.21"
-reqwest = { version = "0.12", features = ["blocking", "json"] }
+reqwest = { version = "0.12", features = ["blocking", "json", "multipart"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 rfd = "0.15"

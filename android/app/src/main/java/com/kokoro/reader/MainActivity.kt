@@ -22,42 +22,29 @@ import com.kokoro.reader.ui.LibraryScreen
 import com.kokoro.reader.ui.ReaderScreen
 import com.kokoro.reader.ui.SettingsScreen
 import com.kokoro.reader.ui.KokoroTheme
-import java.io.File
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         PDFBoxResourceLoader.init(applicationContext)
-        requestStoragePermission()
 
         setContent {
             KokoroTheme {
-                Surface(
-                    modifier = Modifier.fillMaxSize(),
-                    color = MaterialTheme.colorScheme.background
-                ) {
+                Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
                     val prefs = getSharedPreferences("kokoro", MODE_PRIVATE)
-                    var dataDir by remember {
-                        mutableStateOf(prefs.getString("data_dir", null))
-                    }
                     var serverUrl by remember {
-                        mutableStateOf(prefs.getString("server_url", "") ?: "")
+                        mutableStateOf(prefs.getString("server_url", null))
                     }
 
                     val navController = rememberNavController()
-                    val startDest = if (dataDir == null) "settings" else "library"
+                    val startDest = if (serverUrl == null) "settings" else "library"
 
                     NavHost(navController, startDestination = startDest) {
                         composable("settings") {
                             SettingsScreen(
-                                currentDir = dataDir ?: "",
-                                currentServerUrl = serverUrl,
-                                onSave = { dir, url ->
-                                    prefs.edit()
-                                        .putString("data_dir", dir)
-                                        .putString("server_url", url)
-                                        .apply()
-                                    dataDir = dir
+                                currentServerUrl = serverUrl ?: "",
+                                onSave = { url ->
+                                    prefs.edit().putString("server_url", url).apply()
                                     serverUrl = url
                                     navController.navigate("library") {
                                         popUpTo("settings") { inclusive = true }
@@ -67,52 +54,32 @@ class MainActivity : ComponentActivity() {
                         }
 
                         composable("library") {
-                            val dir = dataDir ?: return@composable
-                            val library = remember(dir) { Library(File(dir)) }
+                            val url = serverUrl ?: return@composable
+                            val library = remember(url) { Library(url, cacheDir) }
                             LibraryScreen(
                                 library = library,
                                 onOpenBook = { bookId ->
                                     navController.navigate("reader/$bookId")
                                 },
-                                onSettings = {
-                                    navController.navigate("settings")
-                                },
+                                onSettings = { navController.navigate("settings") },
                                 context = this@MainActivity
                             )
                         }
 
                         composable("reader/{bookId}") { backStackEntry ->
                             val bookId = backStackEntry.arguments?.getString("bookId") ?: return@composable
-                            val dir = dataDir ?: return@composable
-                            val library = remember(dir) { Library(File(dir)) }
+                            val url = serverUrl ?: return@composable
+                            val library = remember(url) { Library(url, cacheDir) }
                             ReaderScreen(
                                 library = library,
                                 bookId = bookId,
-                                serverUrl = serverUrl,
+                                serverUrl = url,
                                 onBack = { navController.popBackStack() }
                             )
                         }
                     }
                 }
             }
-        }
-    }
-
-    private fun requestStoragePermission() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            if (!Environment.isExternalStorageManager()) {
-                val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
-                intent.data = Uri.parse("package:$packageName")
-                startActivity(intent)
-            }
-        } else {
-            requestPermissions(
-                arrayOf(
-                    android.Manifest.permission.READ_EXTERNAL_STORAGE,
-                    android.Manifest.permission.WRITE_EXTERNAL_STORAGE
-                ),
-                1
-            )
         }
     }
 }

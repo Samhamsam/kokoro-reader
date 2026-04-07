@@ -57,7 +57,6 @@ pub struct App {
     needs_render_data: Option<PageRender>,
     resume_sentence: usize,
     settings: crate::library::Settings,
-    settings_path_input: String,
     settings_server_input: String,
 }
 
@@ -89,7 +88,7 @@ impl App {
 
         let (render_tx, render_rx) = mpsc::channel();
         let settings = crate::library::load_settings();
-        let library = Library::load(&settings.data_dir);
+        let library = Library::new(&settings.server_url);
 
         let mut app = Self {
             mode: AppMode::Library,
@@ -115,7 +114,6 @@ impl App {
             needs_render_data: None,
             resume_sentence: 0,
             settings: settings.clone(),
-            settings_path_input: settings.data_dir.to_string_lossy().to_string(),
             settings_server_input: settings.server_url.clone(),
         };
 
@@ -144,7 +142,7 @@ impl App {
 
     fn open_book(&mut self, book_id: &str) {
         if let Some(book) = self.library.get(book_id) {
-            let path = book.book_path(&self.library.data_dir);
+            let path = self.library.get_pdf_path(&book.id).unwrap_or_default();
             let start_page = book.last_page;
             self.selected_voice = book.selected_voice_id.clone();
             self.resume_sentence = book.last_sentence;
@@ -162,7 +160,7 @@ impl App {
         if let AppMode::Reader { ref book_id } = self.mode {
             let sentence = self.tts.current_sentences().1;
                 self.library
-                    .update_progress(book_id, self.current_page, sentence, 0, &self.selected_voice);
+                    .update_progress(book_id, self.current_page, sentence, &self.selected_voice);
         }
         self.pdf = None;
         self.page_texture = None;
@@ -255,7 +253,7 @@ impl App {
             }
             // Save progress
             if let AppMode::Reader { ref book_id } = self.mode {
-                self.library.update_progress(book_id, page, 0, 0, &self.selected_voice);
+                self.library.update_progress(book_id, page, 0, &self.selected_voice);
             }
         }
     }
@@ -628,7 +626,7 @@ impl App {
                             // TTS controls
                             let tts_state = self.tts.state();
                             match tts_state {
-                                TtsState::Loading => {
+                                TtsState::Generating => {
                                     ui.spinner();
                                     ui.label(
                                         RichText::new("Loading model...").color(AMBER),
@@ -912,30 +910,9 @@ impl App {
             .frame(egui::Frame::new().fill(BG_DARK).inner_margin(egui::Margin::symmetric(20, 16)))
             .show(ctx, |ui| {
                 ui.add_space(16.0);
-                ui.label(RichText::new("Data Folder").color(TEXT_PRIMARY).strong());
+                ui.label(RichText::new("Server URL").color(TEXT_PRIMARY).strong());
                 ui.add_space(4.0);
-                ui.label(RichText::new("Books and progress are stored here. Point this to your Syncthing folder for sync.").color(TEXT_DIM).small());
-                ui.add_space(8.0);
-
-                ui.horizontal(|ui| {
-                    let input = egui::TextEdit::singleline(&mut self.settings_path_input)
-                        .desired_width(ui.available_width() - 100.0)
-                        .font(FontId::proportional(14.0));
-                    ui.add(input);
-
-                    if ui.button("Browse").clicked() {
-                        if let Some(folder) = rfd::FileDialog::new().pick_folder() {
-                            self.settings_path_input = folder.to_string_lossy().to_string();
-                        }
-                    }
-                });
-
-                ui.add_space(24.0);
-
-                // TTS Server
-                ui.label(RichText::new("TTS Server").color(TEXT_PRIMARY).strong());
-                ui.add_space(4.0);
-                ui.label(RichText::new("URL of the Go TTS server (kokoro-server).").color(TEXT_DIM).small());
+                ui.label(RichText::new("URL of the Kokoro Server (books, TTS, progress).").color(TEXT_DIM).small());
                 ui.add_space(8.0);
                 ui.add(
                     egui::TextEdit::singleline(&mut self.settings_server_input)
@@ -945,14 +922,12 @@ impl App {
 
                 ui.add_space(16.0);
 
-                let path_changed = self.settings_path_input != self.settings.data_dir.to_string_lossy();
-                let server_changed = self.settings_server_input != self.settings.server_url;
-                if path_changed || server_changed {
+                let changed = self.settings_server_input != self.settings.server_url;
+                if changed {
                     if styled_button(ui, "Save & Apply", ACCENT).clicked() {
-                        self.settings.data_dir = PathBuf::from(&self.settings_path_input);
                         self.settings.server_url = self.settings_server_input.clone();
                         crate::library::save_settings(&self.settings);
-                        self.library = Library::load(&self.settings.data_dir);
+                        self.library = Library::new(&self.settings.server_url);
                         self.tts.set_server_url(&self.settings.server_url);
                         self.voices = fetch_voices(&self.settings.server_url);
                         if !self.voices.is_empty() {

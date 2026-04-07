@@ -44,7 +44,7 @@ fun LibraryScreen(
 
     // Refresh on resume
     LaunchedEffect(Unit) {
-        library.reload()
+        library.refresh()
         books = library.books.toList()
     }
 

@@ -71,6 +71,7 @@ class ServerTtsEngine(private var serverUrl: String) {
         speakJob = scope.launch {
             val producer = launch(Dispatchers.IO) {
                 var consecutiveFailures = 0
+                var successCount = 0
                 for ((i, sentence) in sentences.withIndex()) {
                     if (i < skipSentences) continue
                     if (!isCurrent()) return@launch
@@ -86,9 +87,14 @@ class ServerTtsEngine(private var serverUrl: String) {
                         continue
                     }
                     consecutiveFailures = 0
+                    successCount++
 
                     val parsed = wavToSamples(wavData) ?: continue
                     pcmQueue.put(AudioChunk(i, parsed.first, parsed.second))
+                }
+                // If nothing succeeded, mark as error
+                if (successCount == 0 && isCurrent()) {
+                    state = TtsState.ERROR
                 }
                 pcmQueue.put(null)
             }

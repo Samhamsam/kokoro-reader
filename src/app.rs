@@ -37,6 +37,7 @@ pub struct App {
     library: Library,
     search_query: String,
     // Reader state
+    last_queued_page: usize, // highest page already sent to TTS pipeline
     pdf: Option<PdfDoc>,
     pdf_path: Option<PathBuf>,
     current_page: usize,
@@ -107,6 +108,7 @@ impl App {
             speed: 1.0,
             status_msg: String::new(),
             reading_active: false,
+            last_queued_page: 0,
             page_input: String::new(),
             render_rx,
             render_tx,
@@ -269,30 +271,28 @@ impl App {
         let voice = self.selected_voice.clone();
         let skip = self.resume_sentence;
         self.resume_sentence = 0;
+        self.last_queued_page = self.current_page;
         self.tts.speak(self.page_text.clone(), voice, self.speed, skip);
         self.reading_active = true;
-        // Queue next TWO pages ahead for seamless transitions
-        self.queue_next_pages(2);
+        self.queue_ahead(2);
     }
 
-    /// Queue N pages ahead into the TTS pipeline for seamless playback.
-    fn queue_next_pages(&self, count: usize) {
+    /// Queue up to N more pages into the TTS pipeline, starting from last_queued_page + 1.
+    /// Tracks what's been queued to avoid duplicates.
+    fn queue_ahead(&mut self, count: usize) {
         if let Some(ref pdf) = self.pdf {
             let total = pdf.page_count();
             let mut queued = 0;
-            let mut page = self.current_page + 1;
-            while queued < count && page < total {
-                if let Ok(text) = pdf.page_text(page) {
+            while queued < count && self.last_queued_page + 1 < total {
+                self.last_queued_page += 1;
+                if let Ok(text) = pdf.page_text(self.last_queued_page) {
                     if !text.trim().is_empty() {
                         self.tts.append_page(text);
                         queued += 1;
                     }
-                    // Empty pages are silently skipped
                 }
-                page += 1;
             }
-            if page >= total {
-                // No more pages after what we queued — signal end of book
+            if self.last_queued_page + 1 >= total {
                 self.tts.finish_session();
             }
         }
@@ -546,8 +546,8 @@ impl App {
                 if let AppMode::Reader { ref book_id } = self.mode {
                     self.library.update_progress(book_id, self.current_page, 0, &self.selected_voice);
                 }
-                // Queue the NEXT page after this one
-                self.queue_next_pages(1);
+                // Queue one more page ahead (maintains rolling buffer)
+                self.queue_ahead(1);
             }
         }
 

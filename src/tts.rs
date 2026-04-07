@@ -121,6 +121,10 @@ struct PlaybackInfo {
     play_start: Option<Instant>,
     pause_start: Option<Instant>,
     paused_elapsed: Duration,
+    /// Sentence indices where new pages start (sorted)
+    page_boundaries: Vec<usize>,
+    /// How many page boundaries we've already signaled to the app
+    boundaries_signaled: usize,
 }
 
 pub struct TtsEngine {
@@ -131,12 +135,8 @@ pub struct TtsEngine {
     playback: Arc<Mutex<PlaybackInfo>>,
     sentences: Arc<Mutex<Vec<String>>>,
     server_url: Arc<Mutex<String>>,
-    /// Channel to feed sentences to the worker thread
     sentence_tx: Arc<Mutex<Option<mpsc::Sender<SentenceJob>>>>,
-    /// Signal: how many sentences have been queued in total
     total_queued: Arc<Mutex<usize>>,
-    /// Callback channel: worker notifies when a page boundary sentence starts generating
-    page_boundary_rx: Arc<Mutex<Option<mpsc::Receiver<()>>>>,
 }
 
 impl TtsEngine {
@@ -156,14 +156,13 @@ impl TtsEngine {
             _stream: Arc::new(Mutex::new(Some(stream))),
             generation_id: Arc::new(AtomicU64::new(0)),
             playback: Arc::new(Mutex::new(PlaybackInfo {
-                playing_idx: 0, total: 0,
+                playing_idx: 0, total: 0, page_boundaries: vec![], boundaries_signaled: 0,
                 durations: vec![], play_start: None, pause_start: None, paused_elapsed: Duration::ZERO,
             })),
             sentences: Arc::new(Mutex::new(vec![])),
             server_url: Arc::new(Mutex::new(server_url.to_string())),
             sentence_tx: Arc::new(Mutex::new(None)),
             total_queued: Arc::new(Mutex::new(0)),
-            page_boundary_rx: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -185,13 +184,22 @@ impl TtsEngine {
         (sents, playing)
     }
 
-    /// Check if a page boundary was crossed (non-blocking)
+    /// Check if playback has crossed a page boundary since last check.
+    /// Based on actual playing position, not generation position.
     pub fn check_page_boundary(&self) -> bool {
-        if let Some(ref rx) = *self.page_boundary_rx.lock().unwrap() {
-            rx.try_recv().is_ok()
-        } else {
-            false
+        self.update_playing_index();
+        let mut pb = self.playback.lock().unwrap();
+        let idx = pb.playing_idx;
+        // Check if playing_idx has reached or passed the next unsignaled boundary
+        while pb.boundaries_signaled < pb.page_boundaries.len() {
+            let boundary = pb.page_boundaries[pb.boundaries_signaled];
+            if idx >= boundary {
+                pb.boundaries_signaled += 1;
+                return true;
+            }
+            break;
         }
+        false
     }
 
     fn update_playing_index(&self) {
@@ -224,9 +232,7 @@ impl TtsEngine {
 
         // Set up sentence channel
         let (tx, rx) = mpsc::channel::<SentenceJob>();
-        let (page_tx, page_rx) = mpsc::channel::<()>();
         *self.sentence_tx.lock().unwrap() = Some(tx.clone());
-        *self.page_boundary_rx.lock().unwrap() = Some(page_rx);
         *self.total_queued.lock().unwrap() = sentences.len();
 
         // Queue first page's sentences
@@ -257,6 +263,8 @@ impl TtsEngine {
             pb.play_start = None;
             pb.pause_start = None;
             pb.paused_elapsed = Duration::ZERO;
+            pb.page_boundaries.clear();
+            pb.boundaries_signaled = 0;
         }
 
         thread::spawn(move || {
@@ -292,10 +300,8 @@ impl TtsEngine {
                     continue;
                 }
 
-                // Notify page boundary
-                if job.page_boundary {
-                    let _ = page_tx.send(());
-                }
+                // Page boundary is now tracked by index in PlaybackInfo,
+                // checked by check_page_boundary() based on actual playback position.
 
                 let wav_data = request_tts(&server_url, &job.sentence, &voice, speed);
 
@@ -363,13 +369,15 @@ impl TtsEngine {
         let sentences = split_into_sentences(&text);
         if sentences.is_empty() { return; }
 
-        // Add to sentence list for highlighting
         let offset = {
             let mut all = self.sentences.lock().unwrap();
             let offset = all.len();
             all.extend(sentences.iter().cloned());
             offset
         };
+
+        // Register the first sentence of this page as a boundary
+        self.playback.lock().unwrap().page_boundaries.push(offset);
 
         *self.total_queued.lock().unwrap() += sentences.len();
 

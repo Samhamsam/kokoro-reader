@@ -42,9 +42,11 @@ fun LibraryScreen(
         }
     }
 
-    // Refresh on resume
+    // Refresh on resume (off main thread)
     LaunchedEffect(Unit) {
-        library.refresh()
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            library.refresh()
+        }
         books = library.books.toList()
     }
 

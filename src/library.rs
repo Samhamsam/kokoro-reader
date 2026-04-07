@@ -128,16 +128,20 @@ impl Library {
 
     pub fn delete(&mut self, id: &str) {
         let client = reqwest::blocking::Client::new();
-        client.delete(format!("{}/api/books/{}", self.server_url, id)).send().ok();
-        self.books.retain(|b| b.id != id);
-        // Remove cached PDF
-        let cache_path = self.cache_dir.join(format!("{}.pdf", id));
-        fs::remove_file(cache_path).ok();
+        let ok = client.delete(format!("{}/api/books/{}", self.server_url, id))
+            .send()
+            .map(|r| r.status().is_success() || r.status().as_u16() == 204)
+            .unwrap_or(false);
+        if ok {
+            self.books.retain(|b| b.id != id);
+            let cache_path = self.cache_dir.join(format!("{}.pdf", id));
+            fs::remove_file(cache_path).ok();
+        }
     }
 
     pub fn update_progress(&mut self, id: &str, page: usize, sentence: usize, voice_id: &str) {
         let client = reqwest::blocking::Client::new();
-        client
+        let ok = client
             .put(format!("{}/api/books/{}/progress", self.server_url, id))
             .json(&serde_json::json!({
                 "last_page": page,
@@ -145,13 +149,15 @@ impl Library {
                 "selected_voice_id": voice_id
             }))
             .send()
-            .ok();
-
-        // Update local cache
-        if let Some(book) = self.books.iter_mut().find(|b| b.id == id) {
-            book.last_page = page;
-            book.last_sentence = sentence;
-            book.selected_voice_id = voice_id.to_string();
+            .map(|r| r.status().is_success())
+            .unwrap_or(false);
+        // Only update local state if server confirmed
+        if ok {
+            if let Some(book) = self.books.iter_mut().find(|b| b.id == id) {
+                book.last_page = page;
+                book.last_sentence = sentence;
+                book.selected_voice_id = voice_id.to_string();
+            }
         }
     }
 

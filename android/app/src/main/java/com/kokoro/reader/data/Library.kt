@@ -16,7 +16,8 @@ class Library(private val serverUrl: String, private val cacheDir: File) {
 
     init {
         File(cacheDir, "books").mkdirs()
-        refresh()
+        // Don't call refresh() here — it does network I/O.
+        // Callers must call refresh() from a background thread/coroutine.
     }
 
     fun refresh() {
@@ -75,32 +76,39 @@ class Library(private val serverUrl: String, private val cacheDir: File) {
     }
 
     fun delete(id: String) {
-        try {
+        val ok = try {
             val conn = URL("$serverUrl/api/books/$id").openConnection() as HttpURLConnection
             conn.requestMethod = "DELETE"
             conn.connectTimeout = 5000
-            conn.responseCode // trigger request
+            val code = conn.responseCode
             conn.disconnect()
-        } catch (_: Exception) {}
-        books.removeAll { it.id == id }
-        File(cacheDir, "books/$id.pdf").delete()
+            code in 200..299
+        } catch (_: Exception) { false }
+
+        if (ok) {
+            books.removeAll { it.id == id }
+            File(cacheDir, "books/$id.pdf").delete()
+        }
     }
 
     fun updateProgress(id: String, page: Int, sentence: Int, voiceId: String) {
-        try {
+        val ok = try {
             val conn = URL("$serverUrl/api/books/$id/progress").openConnection() as HttpURLConnection
             conn.requestMethod = "PUT"
             conn.doOutput = true
             conn.setRequestProperty("Content-Type", "application/json")
             conn.connectTimeout = 5000; conn.readTimeout = 5000
             conn.outputStream.write("""{"last_page":$page,"last_sentence":$sentence,"selected_voice_id":"$voiceId"}""".toByteArray())
-            conn.responseCode
+            val code = conn.responseCode
             conn.disconnect()
-        } catch (_: Exception) {}
+            code in 200..299
+        } catch (_: Exception) { false }
 
-        books.find { it.id == id }?.let { book ->
-            val idx = books.indexOf(book)
-            books[idx] = book.copy(last_page = page, last_sentence = sentence, selected_voice_id = voiceId)
+        if (ok) {
+            books.find { it.id == id }?.let { book ->
+                val idx = books.indexOf(book)
+                books[idx] = book.copy(last_page = page, last_sentence = sentence, selected_voice_id = voiceId)
+            }
         }
     }
 

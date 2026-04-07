@@ -127,8 +127,11 @@ func (h *BookHandler) UpdateProgress(w http.ResponseWriter, r *http.Request, id 
 }
 
 func (h *BookHandler) Delete(w http.ResponseWriter, r *http.Request, id string) {
-	h.DB.DeleteBook(id) // idempotent
-	os.Remove(filepath.Join(h.BooksDir, id+".pdf")) // ignore error
+	if err := h.DB.DeleteBook(id); err != nil {
+		log.Printf("Delete DB error for %s: %v", id, err)
+		// Still try to clean up file and return 204 (idempotent)
+	}
+	os.Remove(filepath.Join(h.BooksDir, id+".pdf"))
 	w.WriteHeader(http.StatusNoContent)
 }
 

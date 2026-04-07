@@ -63,9 +63,9 @@ class ServerTtsEngine(private var serverUrl: String) {
         paused = false
         state = TtsState.PLAYING
 
-        // Queue of raw PCM samples (short arrays) with sentence index
-        // null = end of stream
-        val pcmQueue = LinkedBlockingQueue<Pair<Int, ShortArray>?>(5)
+        // Queue: (sentence_index, samples, sample_rate). null = end.
+        data class AudioChunk(val idx: Int, val samples: ShortArray, val sampleRate: Int)
+        val pcmQueue = LinkedBlockingQueue<AudioChunk?>(5)
 
         speakJob = scope.launch {
             // PRODUCER: fetch audio from server, decode WAV, put PCM in queue
@@ -77,61 +77,68 @@ class ServerTtsEngine(private var serverUrl: String) {
                     val wavData = requestTts(sentence, voiceId, speed)
                     if (wavData == null || stopped) break
 
-                    val pcm = wavToShortArray(wavData)
-                    if (pcm != null && !stopped) {
-                        pcmQueue.put(Pair(i, pcm)) // blocks if queue is full
+                    val parsed = wavToSamples(wavData)
+                    if (parsed != null && !stopped) {
+                        pcmQueue.put(AudioChunk(i, parsed.first, parsed.second))
                     }
                 }
                 pcmQueue.put(null) // end sentinel
             }
 
-            // CONSUMER: single AudioTrack, continuously fed with PCM
+            // CONSUMER: plays PCM with correct sample rate per chunk
             launch(Dispatchers.IO) {
-                val sampleRate = 24000 // Kokoro default; Piper is 22050 but resampling is close enough
-                val bufSize = AudioTrack.getMinBufferSize(
-                    sampleRate, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT
-                ).coerceAtLeast(8192)
+                var currentRate = 0
+                var track: AudioTrack? = null
 
-                val track = AudioTrack.Builder()
-                    .setAudioAttributes(AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_MEDIA)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
-                    .setAudioFormat(AudioFormat.Builder()
-                        .setSampleRate(sampleRate)
-                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                        .setChannelMask(AudioFormat.CHANNEL_OUT_MONO).build())
-                    .setBufferSizeInBytes(bufSize)
-                    .setTransferMode(AudioTrack.MODE_STREAM)
-                    .build()
-
-                track.play()
+                fun ensureTrack(rate: Int): AudioTrack {
+                    if (rate != currentRate || track == null) {
+                        track?.stop()
+                        track?.release()
+                        currentRate = rate
+                        val bufSize = AudioTrack.getMinBufferSize(
+                            rate, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT
+                        ).coerceAtLeast(8192)
+                        val t = AudioTrack.Builder()
+                            .setAudioAttributes(AudioAttributes.Builder()
+                                .setUsage(AudioAttributes.USAGE_MEDIA)
+                                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
+                            .setAudioFormat(AudioFormat.Builder()
+                                .setSampleRate(rate)
+                                .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                                .setChannelMask(AudioFormat.CHANNEL_OUT_MONO).build())
+                            .setBufferSizeInBytes(bufSize)
+                            .setTransferMode(AudioTrack.MODE_STREAM)
+                            .build()
+                        t.play()
+                        track = t
+                        return t
+                    }
+                    return track!!
+                }
 
                 while (!stopped) {
-                    val item = pcmQueue.poll(100, java.util.concurrent.TimeUnit.MILLISECONDS)
-                    if (item == null && pcmQueue.isEmpty()) {
-                        // Check if producer is done
+                    val chunk = pcmQueue.poll(100, java.util.concurrent.TimeUnit.MILLISECONDS)
+                    if (chunk == null && pcmQueue.isEmpty()) {
                         if (!producer.isActive) break
                         continue
                     }
-                    if (item == null) break // end sentinel
+                    if (chunk == null) break
 
-                    val (sentenceIdx, samples) = item
-                    currentSentence = sentenceIdx
+                    currentSentence = chunk.idx
+                    val t = ensureTrack(chunk.sampleRate)
 
-                    // Write PCM to AudioTrack — this blocks naturally until played
                     var written = 0
-                    while (written < samples.size && !stopped) {
+                    while (written < chunk.samples.size && !stopped) {
                         while (paused && !stopped) { Thread.sleep(50) }
                         if (stopped) break
-
-                        val result = track.write(samples, written,
-                            minOf(4096, samples.size - written))
+                        val result = t.write(chunk.samples, written,
+                            minOf(4096, chunk.samples.size - written))
                         if (result > 0) written += result
                     }
                 }
 
-                track.stop()
-                track.release()
+                track?.stop()
+                track?.release()
             }
 
             producer.join()
@@ -145,13 +152,19 @@ class ServerTtsEngine(private var serverUrl: String) {
         }
     }
 
-    private fun wavToShortArray(wavData: ByteArray): ShortArray? {
+    /** Returns (samples, sampleRate) parsed from WAV header */
+    private fun wavToSamples(wavData: ByteArray): Pair<ShortArray, Int>? {
         if (wavData.size < 44) return null
+        val sampleRate = (wavData[24].toInt() and 0xFF) or
+                ((wavData[25].toInt() and 0xFF) shl 8) or
+                ((wavData[26].toInt() and 0xFF) shl 16) or
+                ((wavData[27].toInt() and 0xFF) shl 24)
         val numSamples = (wavData.size - 44) / 2
-        return ShortArray(numSamples) { i ->
+        val samples = ShortArray(numSamples) { i ->
             val offset = 44 + i * 2
             (wavData[offset].toInt() and 0xFF or ((wavData[offset + 1].toInt()) shl 8)).toShort()
         }
+        return Pair(samples, sampleRate)
     }
 
     private fun requestTts(text: String, voice: String, speed: Float): ByteArray? {

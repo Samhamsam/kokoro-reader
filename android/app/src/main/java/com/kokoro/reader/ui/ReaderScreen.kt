@@ -33,7 +33,7 @@ fun ReaderScreen(
     onBack: () -> Unit
 ) {
     val book = library.books.find { it.id == bookId } ?: run { onBack(); return }
-    val pdfFile = library.getBookFile(book.id)
+    var pdfFile by remember { mutableStateOf<File?>(null) }
 
     var currentPage by remember { mutableIntStateOf(book.last_page) }
     var totalPages by remember { mutableIntStateOf(book.total_pages) }
@@ -99,7 +99,8 @@ fun ReaderScreen(
                     currentPage++
                     kotlinx.coroutines.delay(300)
                     loading = true
-                    val result = withContext(Dispatchers.IO) { renderPage(pdfFile, currentPage) }
+                    val file = pdfFile ?: continue
+                    val result = withContext(Dispatchers.IO) { renderPage(file, currentPage) }
                     bitmap = result?.first
                     pageText = result?.second ?: ""
                     loading = false
@@ -118,19 +119,26 @@ fun ReaderScreen(
         ttsState = ttsEngine.state
     }
 
-    // Render first page
+    // Download PDF if needed, then render page
     LaunchedEffect(currentPage) {
-        if (!readingActive) { // Only render if not auto-advancing (that's handled above)
+        if (!readingActive) {
             loading = true
-            val result = withContext(Dispatchers.IO) { renderPage(pdfFile, currentPage) }
+            // Download PDF on IO thread if not cached
+            if (pdfFile == null || !pdfFile!!.exists()) {
+                pdfFile = withContext(Dispatchers.IO) { library.getBookFile(book.id) }
+            }
+            val file = pdfFile ?: run { loading = false; return@LaunchedEffect }
+            val result = withContext(Dispatchers.IO) { renderPage(file, currentPage) }
             bitmap = result?.first
             pageText = result?.second ?: ""
             loading = false
 
             if (totalPages == 0) {
-                totalPages = withContext(Dispatchers.IO) { getPageCount(pdfFile) }
+                totalPages = withContext(Dispatchers.IO) { getPageCount(file) }
             }
-            library.updateProgress(bookId, currentPage, 0, selectedVoice)
+            withContext(Dispatchers.IO) {
+                library.updateProgress(bookId, currentPage, 0, selectedVoice)
+            }
         }
     }
 

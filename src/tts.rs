@@ -114,7 +114,8 @@ struct PlaybackInfo {
     total: usize,
     durations: Vec<f32>,
     play_start: Option<Instant>,
-    paused_elapsed: Duration, // accumulated pause time
+    pause_start: Option<Instant>,
+    paused_elapsed: Duration,
 }
 
 pub struct TtsEngine {
@@ -145,7 +146,7 @@ impl TtsEngine {
             generation_id: Arc::new(AtomicU64::new(0)),
             playback: Arc::new(Mutex::new(PlaybackInfo {
                 generating_idx: 0, playing_idx: 0, total: 0,
-                durations: vec![], play_start: None, paused_elapsed: Duration::ZERO,
+                durations: vec![], play_start: None, pause_start: None, paused_elapsed: Duration::ZERO,
             })),
             sentences: Arc::new(Mutex::new(vec![])),
             server_url: Arc::new(Mutex::new(server_url.to_string())),
@@ -285,12 +286,8 @@ impl TtsEngine {
     pub fn pause(&self) {
         if let Some(sink) = self.sink.lock().unwrap().as_ref() {
             sink.pause();
-            // Record when we paused so we can adjust elapsed time
             let mut pb = self.playback.lock().unwrap();
-            if let Some(start) = pb.play_start {
-                // paused_elapsed will be updated on resume
-                let _ = start; // just holding the lock
-            }
+            pb.pause_start = Some(Instant::now());
             *self.state.lock().unwrap() = TtsState::Paused;
         }
     }
@@ -298,6 +295,10 @@ impl TtsEngine {
     pub fn resume(&self) {
         if let Some(sink) = self.sink.lock().unwrap().as_ref() {
             sink.play();
+            let mut pb = self.playback.lock().unwrap();
+            if let Some(pause_start) = pb.pause_start.take() {
+                pb.paused_elapsed += pause_start.elapsed();
+            }
             *self.state.lock().unwrap() = TtsState::Playing;
         }
     }

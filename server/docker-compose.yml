@@ -4,9 +4,10 @@ services:
     ports:
       - "8787:8787"
     volumes:
-      - ./models-tts:/app/models-tts:ro
+      - kokoro-models:/app/models-tts
       - kokoro-data:/app/data
     restart: unless-stopped
 
 volumes:
+  kokoro-models:
   kokoro-data:

@@ -3,3 +3,7 @@
 *.wav
 *.mp3
 .venv/
+android/app/build/
+android/.gradle/
+android/build/
+*.apk

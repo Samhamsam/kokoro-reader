@@ -83,7 +83,7 @@ class ServerTtsEngine(private var serverUrl: String) {
                 pcmQueue.put(null)
             }
 
-            launch(Dispatchers.IO) {
+            val consumerJob = launch(Dispatchers.IO) {
                 var currentRate = 0
                 var track: AudioTrack? = null
 
@@ -131,12 +131,10 @@ class ServerTtsEngine(private var serverUrl: String) {
                 track?.stop(); track?.release()
             }
 
+            // Wait for both producer AND consumer to finish
             producer.join()
-            if (isCurrent()) {
-                while (!pcmQueue.isEmpty()) { delay(100) }
-                delay(200)
-                state = TtsState.FINISHED
-            }
+            consumerJob.join()
+            if (isCurrent()) state = TtsState.FINISHED
         }
     }
 

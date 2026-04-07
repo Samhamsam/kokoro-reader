@@ -224,6 +224,7 @@ impl TtsEngine {
                 pb.total = total;
                 pb.durations.clear();
                 pb.play_start = None;
+                pb.pause_start = None;
                 pb.paused_elapsed = Duration::ZERO;
             }
 

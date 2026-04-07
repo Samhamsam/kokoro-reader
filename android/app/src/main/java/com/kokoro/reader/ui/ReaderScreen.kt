@@ -288,7 +288,31 @@ fun ReaderScreen(
 
                     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
                         Text("Speed: ${String.format("%.1f", speed)}x", color = TextDim, fontSize = 12.sp)
-                        Slider(value = speed, onValueChange = { speed = it; ttsEngine.setSpeed(it) }, valueRange = 0.5f..2.0f, steps = 5, modifier = Modifier.weight(1f))
+                        Slider(value = speed, onValueChange = { newSpeed ->
+                            if (newSpeed != speed) {
+                                speed = newSpeed
+                                ttsEngine.setSpeed(newSpeed)
+                                // Restart from current sentence with new speed
+                                if (readingActive) {
+                                    val curSentence = ttsEngine.currentSentence
+                                    ttsEngine.stop()
+                                    coroutineScope.launch(Dispatchers.IO) {
+                                        ttsEngine.speak(pageText, selectedVoice, newSpeed, skipSentences = curSentence)
+                                        // Re-queue ahead
+                                        val file = pdfFile ?: return@launch
+                                        lastQueuedPage = currentPage
+                                        for (n in 1..2) {
+                                            if (lastQueuedPage + 1 < totalPages) {
+                                                lastQueuedPage++
+                                                val t = extractPageText(file, lastQueuedPage)
+                                                if (t.isNotBlank()) ttsEngine.appendPage(t)
+                                            }
+                                        }
+                                        if (lastQueuedPage + 1 >= totalPages) ttsEngine.finishSession()
+                                    }
+                                }
+                            }
+                        }, valueRange = 0.5f..2.0f, steps = 5, modifier = Modifier.weight(1f))
                     }
                 }
             }

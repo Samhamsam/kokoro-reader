@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 	"path/filepath"
 	"strings"
 
@@ -99,8 +100,8 @@ func (h *SummaryHandler) Summarize(w http.ResponseWriter, r *http.Request, id st
 }
 
 func (h *SummaryHandler) generateSummary(title, text, lang string) (string, error) {
-	// Split into chunks of ~15000 chars (~4000 tokens)
-	chunks := splitText(text, 15000)
+	// Split into chunks of ~6000 chars (~1500 tokens) to stay within Groq free tier limits
+	chunks := splitText(text, 6000)
 
 	langName := langFullName(lang)
 
@@ -176,35 +177,47 @@ func (h *SummaryHandler) callGroq(prompt string) (string, error) {
 		return "", err
 	}
 
-	req, err := http.NewRequest("POST", "https://api.groq.com/openai/v1/chat/completions", bytes.NewReader(jsonBody))
-	if err != nil {
-		return "", err
+	// Retry with backoff for rate limits
+	for attempt := 0; attempt < 5; attempt++ {
+		req, err := http.NewRequest("POST", "https://api.groq.com/openai/v1/chat/completions", bytes.NewReader(jsonBody))
+		if err != nil {
+			return "", err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+h.APIKey)
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return "", err
+		}
+
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		if resp.StatusCode == 429 {
+			wait := time.Duration(15*(attempt+1)) * time.Second
+			log.Printf("  Rate limited, waiting %v...", wait)
+			time.Sleep(wait)
+			continue
+		}
+
+		var groqResp groqResponse
+		if err := json.Unmarshal(body, &groqResp); err != nil {
+			return "", fmt.Errorf("parse error: %s", string(body[:min(len(body), 200)]))
+		}
+
+		if groqResp.Error != nil {
+			return "", fmt.Errorf("groq: %s", groqResp.Error.Message)
+		}
+
+		if len(groqResp.Choices) == 0 {
+			return "", fmt.Errorf("no response from Groq")
+		}
+
+		return groqResp.Choices[0].Message.Content, nil
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+h.APIKey)
 
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-
-	var groqResp groqResponse
-	if err := json.Unmarshal(body, &groqResp); err != nil {
-		return "", fmt.Errorf("parse error: %s", string(body[:min(len(body), 200)]))
-	}
-
-	if groqResp.Error != nil {
-		return "", fmt.Errorf("groq: %s", groqResp.Error.Message)
-	}
-
-	if len(groqResp.Choices) == 0 {
-		return "", fmt.Errorf("no response from Groq")
-	}
-
-	return groqResp.Choices[0].Message.Content, nil
+	return "", fmt.Errorf("rate limit: too many retries")
 }
 
 func extractPDFText(path string) (string, error) {

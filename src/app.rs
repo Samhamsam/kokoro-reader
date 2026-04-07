@@ -271,30 +271,28 @@ impl App {
         self.resume_sentence = 0;
         self.tts.speak(self.page_text.clone(), voice, self.speed, skip);
         self.reading_active = true;
-        // Queue the next page's audio immediately — seamless transition
-        self.queue_next_page();
+        // Queue next TWO pages ahead for seamless transitions
+        self.queue_next_pages(2);
     }
 
-    /// Append next page's text to the running TTS session.
-    /// Audio continues without interruption across page boundaries.
-    fn queue_next_page(&self) {
-        let next_page = self.current_page + 1;
+    /// Queue N pages ahead into the TTS pipeline for seamless playback.
+    fn queue_next_pages(&self, count: usize) {
         if let Some(ref pdf) = self.pdf {
-            if next_page < pdf.page_count() {
-                if let Ok(text) = pdf.page_text(next_page) {
+            let total = pdf.page_count();
+            let mut queued = 0;
+            let mut page = self.current_page + 1;
+            while queued < count && page < total {
+                if let Ok(text) = pdf.page_text(page) {
                     if !text.trim().is_empty() {
                         self.tts.append_page(text);
-                    } else {
-                        // Empty page — try the one after
-                        if next_page + 1 < pdf.page_count() {
-                            if let Ok(text2) = pdf.page_text(next_page + 1) {
-                                self.tts.append_page(text2);
-                            }
-                        }
+                        queued += 1;
                     }
+                    // Empty pages are silently skipped
                 }
-            } else {
-                // Last page — close the session so worker knows to finish
+                page += 1;
+            }
+            if page >= total {
+                // No more pages after what we queued — signal end of book
                 self.tts.finish_session();
             }
         }
@@ -549,7 +547,7 @@ impl App {
                     self.library.update_progress(book_id, self.current_page, 0, &self.selected_voice);
                 }
                 // Queue the NEXT page after this one
-                self.queue_next_page();
+                self.queue_next_pages(1);
             }
         }
 

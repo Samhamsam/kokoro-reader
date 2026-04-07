@@ -144,7 +144,12 @@ class ServerTtsEngine(private var serverUrl: String) {
             // Wait for both producer AND consumer to finish
             producer.join()
             consumerJob.join()
-            if (isCurrent()) state = TtsState.FINISHED
+            if (isCurrent()) {
+                // If producer ended with ERROR (server down), keep that state
+                if (state != TtsState.ERROR) {
+                    state = TtsState.FINISHED
+                }
+            }
         }
     }
 

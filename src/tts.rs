@@ -275,7 +275,16 @@ impl TtsEngine {
             let mut success_count = 0usize;
             let mut consecutive_failures = 0usize;
 
-            while let Ok(job) = rx.recv() {
+            loop {
+                // Use timeout so we don't hang forever if no more pages are queued
+                let job = match rx.recv_timeout(Duration::from_secs(30)) {
+                    Ok(j) => j,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        // No new sentences for 30s — assume session is done
+                        break;
+                    }
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break, // channel closed
+                };
                 if !is_current() { return; }
 
                 if job.global_idx < skip_sentences {
@@ -327,7 +336,13 @@ impl TtsEngine {
                 }
             }
 
-            // Channel closed (no more pages) — wait for playback to finish
+            // If nothing was ever played, it's an error
+            if success_count == 0 && is_current() {
+                *state.lock().unwrap() = TtsState::Error("No audio generated".into());
+                return;
+            }
+
+            // Wait for playback to finish
             loop {
                 if !is_current() { return; }
                 let empty = sink_holder.lock().unwrap().as_ref().is_some_and(|s| s.empty());

@@ -390,23 +390,15 @@ impl App {
                                 .inner_margin(egui::Margin::same(14))
                                 .stroke(Stroke::new(1.0, Color32::from_rgb(45, 47, 60)));
 
-                            frame.show(ui, |ui| {
-                                // Title row
+                            let card_resp = frame.show(ui, |ui| {
+                                // Title row with delete button
                                 ui.horizontal(|ui| {
-                                    // Clickable title area
-                                    let title_resp = ui.add(
-                                        egui::Label::new(
-                                            RichText::new(&book.title)
-                                                .font(FontId::proportional(16.0))
-                                                .color(TEXT_PRIMARY)
-                                                .strong(),
-                                        ).sense(egui::Sense::click())
+                                    ui.label(
+                                        RichText::new(&book.title)
+                                            .font(FontId::proportional(16.0))
+                                            .color(TEXT_PRIMARY)
+                                            .strong(),
                                     );
-                                    if title_resp.clicked() {
-                                        open_id = Some(book_id.clone());
-                                    }
-
-                                    // Spacer + delete button on far right
                                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                         if ui.add(
                                             egui::Button::new(RichText::new("Delete").color(RED).small())
@@ -419,37 +411,37 @@ impl App {
 
                                 ui.add_space(6.0);
 
-                                // Clickable progress area
-                                let progress_resp = ui.vertical(|ui| {
-                                    // Progress bar
-                                    let bar_height = 6.0;
-                                    let bar_width = ui.available_width();
-                                    let (rect, _) = ui.allocate_exact_size(
-                                        Vec2::new(bar_width, bar_height),
-                                        egui::Sense::hover(),
-                                    );
-                                    ui.painter().rect_filled(rect, egui::CornerRadius::same(3), PROGRESS_BG);
-                                    let filled = Rect::from_min_size(
-                                        rect.min,
-                                        Vec2::new(bar_width * progress, bar_height),
-                                    );
-                                    ui.painter().rect_filled(filled, egui::CornerRadius::same(3), ACCENT);
+                                // Progress bar
+                                let bar_height = 6.0;
+                                let bar_width = ui.available_width();
+                                let (rect, _) = ui.allocate_exact_size(
+                                    Vec2::new(bar_width, bar_height),
+                                    egui::Sense::hover(),
+                                );
+                                ui.painter().rect_filled(rect, egui::CornerRadius::same(3), PROGRESS_BG);
+                                let filled = Rect::from_min_size(
+                                    rect.min,
+                                    Vec2::new(bar_width * progress, bar_height),
+                                );
+                                ui.painter().rect_filled(filled, egui::CornerRadius::same(3), ACCENT);
 
-                                    ui.add_space(4.0);
-                                    ui.label(
-                                        RichText::new(format!(
-                                            "{}%  —  Page {} / {}",
-                                            pct, book.last_page + 1, book.total_pages
-                                        ))
-                                        .color(TEXT_DIM)
-                                        .small(),
-                                    );
-                                }).response;
+                                ui.add_space(4.0);
+                                ui.label(
+                                    RichText::new(format!(
+                                        "{}%  —  Page {} / {}",
+                                        pct, book.last_page + 1, book.total_pages
+                                    ))
+                                    .color(TEXT_DIM)
+                                    .small(),
+                                );
+                            });
 
-                                if progress_resp.interact(egui::Sense::click()).clicked() {
+                            // Whole card clickable (except delete button which handles its own click)
+                            if card_resp.response.interact(egui::Sense::click()).clicked() {
+                                if delete_id.is_none() {
                                     open_id = Some(book.id.clone());
                                 }
-                            });
+                            }
 
                             ui.add_space(6.0);
                         });

@@ -177,12 +177,20 @@ class TtsEngine(context: Context) {
     }
 
     companion object {
+        private fun prepareForTts(text: String): String {
+            return text
+                .replace(" (", ", (").replace(" [", ", [")
+                .replace(") ", "), ").replace("] ", "], ")
+                .replace(" — ", ", — ").replace(" – ", ", – ").replace(" - ", ", — ")
+                .replace(",,", ",").replace(", ,", ",")
+        }
+
         fun splitIntoSentences(text: String): List<String> {
-            val cleaned = text
+            val cleaned = prepareForTts(text
                 .replace(Regex("[\\p{Cntrl}]"), " ")
                 .replace(Regex("[♦♣♠♥★☆●○◆◇■□▪▫▲△▼▽•‣⁃※†‡§¶]"), " ")
                 .replace(Regex("\\s+"), " ")
-                .trim()
+                .trim())
 
             if (cleaned.isEmpty()) return emptyList()
 

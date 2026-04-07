@@ -5,6 +5,26 @@ use std::time::{Duration, Instant};
 
 use rodio;
 
+// ── Text preprocessing for natural TTS pauses ──
+
+fn prepare_for_tts(text: &str) -> String {
+    let mut result = text.to_string();
+    // Add comma pause before opening parenthesis/bracket
+    result = result.replace(" (", ", (");
+    result = result.replace(" [", ", [");
+    // Add comma pause after closing parenthesis/bracket if not followed by punctuation
+    result = result.replace(") ", "), ");
+    result = result.replace("] ", "], ");
+    // Add pause around em-dash
+    result = result.replace(" — ", ", — ");
+    result = result.replace(" – ", ", – ");
+    result = result.replace(" - ", ", — ");
+    // Clean up double commas
+    result = result.replace(",,", ",");
+    result = result.replace(", ,", ",");
+    result
+}
+
 // ── Sentence splitting ──
 
 fn clean_text(text: &str) -> String {
@@ -46,6 +66,7 @@ fn is_abbreviation(text: &str) -> bool {
 
 pub fn split_into_sentences(text: &str) -> Vec<String> {
     let text = clean_text(text);
+    let text = prepare_for_tts(&text);
     if text.is_empty() { return vec![]; }
     let mut sentences = Vec::new();
     let mut current = String::new();

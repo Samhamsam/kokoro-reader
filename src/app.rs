@@ -481,18 +481,9 @@ impl App {
         // Apply deferred page render (from synchronous go_to_page)
         if let Some(render) = self.needs_render_data.take() {
             self.apply_render(render, ctx);
-            if self.reading_active {
-                if !self.page_text.trim().is_empty() {
-                    self.start_reading();
-                } else {
-                    let page_count = self.pdf.as_ref().map_or(0, |p| p.page_count());
-                    if self.current_page + 1 < page_count {
-                        self.go_to_page(self.current_page + 1);
-                    } else {
-                        self.reading_active = false;
-                    }
-                }
-            }
+            // NOTE: do NOT call start_reading() here during auto-advance.
+            // The TTS pipeline is already running continuously via append_page().
+            // start_reading() would kill the running session and restart from scratch.
         }
 
         // Process background render results (initial PDF open)

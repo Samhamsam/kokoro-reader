@@ -154,9 +154,8 @@ struct PlaybackInfo {
     play_start: Option<Instant>,
     pause_start: Option<Instant>,
     paused_elapsed: Duration,
-    /// Sentence indices where new pages start (sorted)
-    page_boundaries: Vec<usize>,
-    /// How many page boundaries we've already signaled to the app
+    /// (sentence_index, page_number) where new pages start
+    page_boundaries: Vec<(usize, usize)>,
     boundaries_signaled: usize,
 }
 
@@ -217,22 +216,20 @@ impl TtsEngine {
         (sents, playing)
     }
 
-    /// Check if playback has crossed a page boundary since last check.
-    /// Based on actual playing position, not generation position.
-    pub fn check_page_boundary(&self) -> bool {
+    /// Check if playback has crossed a page boundary. Returns the page number to advance to.
+    pub fn check_page_boundary(&self) -> Option<usize> {
         self.update_playing_index();
         let mut pb = self.playback.lock().unwrap();
         let idx = pb.playing_idx;
-        // Check if playing_idx has reached or passed the next unsignaled boundary
         while pb.boundaries_signaled < pb.page_boundaries.len() {
-            let boundary = pb.page_boundaries[pb.boundaries_signaled];
-            if idx >= boundary {
+            let (sentence_idx, page_num) = pb.page_boundaries[pb.boundaries_signaled];
+            if idx >= sentence_idx {
                 pb.boundaries_signaled += 1;
-                return true;
+                return Some(page_num);
             }
             break;
         }
-        false
+        None
     }
 
     fn update_playing_index(&self) {
@@ -403,7 +400,7 @@ impl TtsEngine {
 
     /// Append another page's text to the running playback session.
     /// Audio continues without interruption.
-    pub fn append_page(&self, text: String) {
+    pub fn append_page(&self, text: String, page_num: usize) {
         let sentences = split_into_sentences(&text);
         if sentences.is_empty() { return; }
 
@@ -414,8 +411,8 @@ impl TtsEngine {
             offset
         };
 
-        // Register the first sentence of this page as a boundary
-        self.playback.lock().unwrap().page_boundaries.push(offset);
+        // Register boundary with actual page number
+        self.playback.lock().unwrap().page_boundaries.push((offset, page_num));
 
         *self.total_queued.lock().unwrap() += sentences.len();
 

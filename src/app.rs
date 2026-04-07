@@ -289,7 +289,7 @@ impl App {
                 self.last_queued_page += 1;
                 if let Ok(text) = pdf.page_text(self.last_queued_page) {
                     if !text.trim().is_empty() {
-                        self.tts.append_page(text);
+                        self.tts.append_page(text, self.last_queued_page);
                         queued += 1;
                     }
                 }
@@ -517,10 +517,12 @@ impl App {
 
         // Page boundary: TTS worker crossed into next page's sentences.
         // Advance the visual page and queue the page after that.
-        if self.reading_active && self.tts.check_page_boundary() {
+        if let Some(target_page) = {
+            if self.reading_active { self.tts.check_page_boundary() } else { None }
+        } {
             let page_count = self.pdf.as_ref().map_or(0, |p| p.page_count());
-            if self.current_page + 1 < page_count {
-                self.current_page += 1;
+            if target_page < page_count {
+                self.current_page = target_page;
                 // Render new page visually (synchronous, fast)
                 if let Some(ref pdf) = self.pdf {
                     if let Ok(render) = pdf.render_page(self.current_page, 1200) {

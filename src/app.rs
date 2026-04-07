@@ -732,12 +732,11 @@ impl App {
                                     .trailing_fill(true),
                             );
                             if (self.speed - old_speed).abs() > 0.01 && self.reading_active {
-                                // Restart from current sentence with new speed
-                                let (_, current_idx) = self.tts.current_sentences();
+                                // Restart from beginning of current page with new speed
                                 let voice = self.selected_voice.clone();
                                 self.tts.stop();
                                 self.last_queued_page = self.current_page;
-                                self.tts.speak(self.page_text.clone(), voice, self.speed, current_idx);
+                                self.tts.speak(self.page_text.clone(), voice, self.speed, 0);
                                 self.queue_ahead(2);
                             }
                         },

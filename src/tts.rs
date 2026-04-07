@@ -5,35 +5,32 @@ use std::time::{Duration, Instant};
 
 use rodio;
 
-// ── Text preprocessing for natural TTS pauses ──
+// ── Text preprocessing ──
 
-fn prepare_for_tts(text: &str) -> String {
-    // Remove page numbers (standalone numbers, typically at start/end of page)
-    let lines: Vec<&str> = text.lines().collect();
-    let filtered: Vec<&str> = lines.into_iter().filter(|line| {
+/// Remove page numbers (standalone number lines). Applied before splitting.
+fn filter_page_numbers(text: &str) -> String {
+    text.lines().filter(|line| {
         let trimmed = line.trim();
-        // Skip lines that are just a number (page number)
         if trimmed.parse::<u32>().is_ok() { return false; }
-        // Skip lines like "- 42 -" or "—42—"
         let stripped = trimmed.replace('-', "").replace('—', "").trim().to_string();
         if !stripped.is_empty() && stripped.parse::<u32>().is_ok() { return false; }
         true
-    }).collect();
-    let mut result = filtered.join(" ");
-    // Add comma pause before opening parenthesis/bracket
-    result = result.replace(" (", ", (");
-    result = result.replace(" [", ", [");
-    // Add comma pause after closing parenthesis/bracket if not followed by punctuation
-    result = result.replace(") ", "), ");
-    result = result.replace("] ", "], ");
-    // Add pause around em-dash
-    result = result.replace(" — ", ", — ");
-    result = result.replace(" – ", ", – ");
-    result = result.replace(" - ", ", — ");
-    // Clean up double commas
-    result = result.replace(",,", ",");
-    result = result.replace(", ,", ",");
-    result
+    }).collect::<Vec<_>>().join("\n")
+}
+
+/// Add natural pauses around parentheses/dashes. Applied per-sentence at TTS request time only.
+/// NOT applied during splitting — keeps original text for PDF highlighting.
+fn add_tts_pauses(text: &str) -> String {
+    let mut r = text.to_string();
+    r = r.replace(" (", ", (");
+    r = r.replace(" [", ", [");
+    r = r.replace(") ", "), ");
+    r = r.replace("] ", "], ");
+    r = r.replace(" — ", ", — ");
+    r = r.replace(" – ", ", – ");
+    r = r.replace(",,", ",");
+    r = r.replace(", ,", ",");
+    r
 }
 
 // ── Sentence splitting ──
@@ -76,9 +73,8 @@ fn is_abbreviation(text: &str) -> bool {
 }
 
 pub fn split_into_sentences(text: &str) -> Vec<String> {
-    let text = clean_text(text);
-    // NOTE: prepare_for_tts is NOT applied here — it's applied per-sentence
-    // before sending to TTS server. This keeps original text for highlighting.
+    let text = filter_page_numbers(text);
+    let text = clean_text(&text);
     if text.is_empty() { return vec![]; }
     let mut sentences = Vec::new();
     let mut current = String::new();
@@ -335,8 +331,8 @@ impl TtsEngine {
                     continue;
                 }
 
-                // Apply TTS preprocessing per-sentence (not stored — keeps original for highlighting)
-                let tts_text = prepare_for_tts(&job.sentence);
+                // Add pauses for TTS only (not stored — keeps original for highlighting)
+                let tts_text = add_tts_pauses(&job.sentence);
                 let wav_data = request_tts(&server_url, &tts_text, &voice, speed);
 
                 if !is_current() { return; }

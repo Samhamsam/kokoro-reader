@@ -107,7 +107,7 @@ class Library(private val serverUrl: String, private val cacheDir: File) {
         if (ok) {
             books.find { it.id == id }?.let { book ->
                 val idx = books.indexOf(book)
-                books[idx] = book.copy(last_page = page, last_sentence = sentence, selected_voice_id = voiceId)
+                books[idx] = book.copy(last_page = page, last_sentence = sentence, selected_voice_id = voiceId, speed = speed)
             }
         }
     }

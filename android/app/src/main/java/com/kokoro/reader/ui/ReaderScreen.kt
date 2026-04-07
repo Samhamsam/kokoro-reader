@@ -116,7 +116,7 @@ fun ReaderScreen(
                         bitmap = result?.first
                         pageText = result?.second ?: ""
                     }
-                    withContext(Dispatchers.IO) { library.updateProgress(bookId, currentPage, 0, selectedVoice) }
+                    withContext(Dispatchers.IO) { library.updateProgress(bookId, currentPage, 0, selectedVoice, speed) }
                     // Queue one more page ahead (IO thread)
                     if (lastQueuedPage + 1 < totalPages) {
                         lastQueuedPage++
@@ -157,9 +157,7 @@ fun ReaderScreen(
             if (totalPages == 0) {
                 totalPages = withContext(Dispatchers.IO) { getPageCount(file) }
             }
-            withContext(Dispatchers.IO) {
-                withContext(Dispatchers.IO) { library.updateProgress(bookId, currentPage, 0, selectedVoice) }
-            }
+            withContext(Dispatchers.IO) { library.updateProgress(bookId, currentPage, 0, selectedVoice, speed) }
         }
     }
 
@@ -167,7 +165,7 @@ fun ReaderScreen(
         onDispose {
             ttsEngine.stop()
             com.kokoro.reader.tts.TtsService.stop(context)
-            Thread { library.updateProgress(bookId, currentPage, ttsEngine.currentSentence, selectedVoice) }.start()
+            Thread { library.updateProgress(bookId, currentPage, ttsEngine.currentSentence, selectedVoice, speed) }.start()
         }
     }
 
@@ -178,7 +176,7 @@ fun ReaderScreen(
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         TextButton(onClick = {
                             ttsEngine.stop()
-                            Thread { library.updateProgress(bookId, currentPage, ttsEngine.currentSentence, selectedVoice) }.start()
+                            Thread { library.updateProgress(bookId, currentPage, ttsEngine.currentSentence, selectedVoice, speed) }.start()
                             onBack()
                         }) { Text("< Library", color = TextPrimary) }
 
@@ -298,10 +296,10 @@ fun ReaderScreen(
                                 ttsEngine.setSpeed(newSpeed)
                                 // Restart from current sentence with new speed
                                 if (readingActive) {
-                                    val curSentence = ttsEngine.currentSentence
                                     ttsEngine.stop()
                                     coroutineScope.launch(Dispatchers.IO) {
-                                        ttsEngine.speak(pageText, selectedVoice, newSpeed, skipSentences = curSentence)
+                                        // Restart from beginning of current page with new speed
+                                        ttsEngine.speak(pageText, selectedVoice, newSpeed)
                                         // Re-queue ahead
                                         val file = pdfFile ?: return@launch
                                         lastQueuedPage = currentPage

@@ -1,6 +1,6 @@
 services:
   kokoro-server:
-    build: .
+    image: ghcr.io/samhamsam/kokoro-reader/kokoro-server:latest
     ports:
       - "8787:8787"
     volumes:

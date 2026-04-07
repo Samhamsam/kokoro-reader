@@ -1,6 +1,5 @@
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -108,8 +107,14 @@ pub enum TtsState {
     Error(String),
 }
 
+/// A tagged sentence for the worker queue
+struct SentenceJob {
+    sentence: String,
+    global_idx: usize, // index across all pages
+    page_boundary: bool, // true = this is the first sentence of a new page
+}
+
 struct PlaybackInfo {
-    generating_idx: usize,
     playing_idx: usize,
     total: usize,
     durations: Vec<f32>,
@@ -122,10 +127,16 @@ pub struct TtsEngine {
     state: Arc<Mutex<TtsState>>,
     sink: Arc<Mutex<Option<rodio::Sink>>>,
     _stream: Arc<Mutex<Option<rodio::OutputStream>>>,
-    generation_id: Arc<AtomicU64>, // incremented on each speak(), threads check this
+    generation_id: Arc<AtomicU64>,
     playback: Arc<Mutex<PlaybackInfo>>,
     sentences: Arc<Mutex<Vec<String>>>,
     server_url: Arc<Mutex<String>>,
+    /// Channel to feed sentences to the worker thread
+    sentence_tx: Arc<Mutex<Option<mpsc::Sender<SentenceJob>>>>,
+    /// Signal: how many sentences have been queued in total
+    total_queued: Arc<Mutex<usize>>,
+    /// Callback channel: worker notifies when a page boundary sentence starts generating
+    page_boundary_rx: Arc<Mutex<Option<mpsc::Receiver<()>>>>,
 }
 
 impl TtsEngine {
@@ -145,11 +156,14 @@ impl TtsEngine {
             _stream: Arc::new(Mutex::new(Some(stream))),
             generation_id: Arc::new(AtomicU64::new(0)),
             playback: Arc::new(Mutex::new(PlaybackInfo {
-                generating_idx: 0, playing_idx: 0, total: 0,
+                playing_idx: 0, total: 0,
                 durations: vec![], play_start: None, pause_start: None, paused_elapsed: Duration::ZERO,
             })),
             sentences: Arc::new(Mutex::new(vec![])),
             server_url: Arc::new(Mutex::new(server_url.to_string())),
+            sentence_tx: Arc::new(Mutex::new(None)),
+            total_queued: Arc::new(Mutex::new(0)),
+            page_boundary_rx: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -161,7 +175,7 @@ impl TtsEngine {
 
     pub fn progress(&self) -> (usize, usize, usize) {
         let pb = self.playback.lock().unwrap();
-        (pb.generating_idx, pb.playing_idx + 1, pb.total)
+        (0, pb.playing_idx + 1, pb.total)
     }
 
     pub fn current_sentences(&self) -> (Vec<String>, usize) {
@@ -171,16 +185,23 @@ impl TtsEngine {
         (sents, playing)
     }
 
+    /// Check if a page boundary was crossed (non-blocking)
+    pub fn check_page_boundary(&self) -> bool {
+        if let Some(ref rx) = *self.page_boundary_rx.lock().unwrap() {
+            rx.try_recv().is_ok()
+        } else {
+            false
+        }
+    }
+
     fn update_playing_index(&self) {
         let mut pb = self.playback.lock().unwrap();
         if pb.durations.is_empty() || pb.play_start.is_none() { return; }
-        // Subtract paused time from elapsed (including current ongoing pause)
         let mut total_paused = pb.paused_elapsed;
         if let Some(pause_start) = pb.pause_start {
             total_paused += pause_start.elapsed();
         }
-        let elapsed = pb.play_start.unwrap().elapsed().saturating_sub(total_paused);
-        let elapsed = elapsed.as_secs_f32();
+        let elapsed = pb.play_start.unwrap().elapsed().saturating_sub(total_paused).as_secs_f32();
         let mut cumulative = 0.0f32;
         for (i, &dur) in pb.durations.iter().enumerate() {
             cumulative += dur;
@@ -189,12 +210,35 @@ impl TtsEngine {
         pb.playing_idx = pb.durations.len().saturating_sub(1);
     }
 
+    /// Start a new continuous playback session.
+    /// Call append_page() to feed more pages into the running session.
     pub fn speak(&self, text: String, voice: String, speed: f32, skip_sentences: usize) {
-        // Invalidate any previous generation
         let my_gen = self.generation_id.fetch_add(1, Ordering::SeqCst) + 1;
-
-        // Stop old playback
         if let Some(sink) = self.sink.lock().unwrap().take() { sink.stop(); }
+
+        let sentences = split_into_sentences(&text);
+        if sentences.is_empty() {
+            *self.state.lock().unwrap() = TtsState::Finished;
+            return;
+        }
+
+        // Set up sentence channel
+        let (tx, rx) = mpsc::channel::<SentenceJob>();
+        let (page_tx, page_rx) = mpsc::channel::<()>();
+        *self.sentence_tx.lock().unwrap() = Some(tx.clone());
+        *self.page_boundary_rx.lock().unwrap() = Some(page_rx);
+        *self.total_queued.lock().unwrap() = sentences.len();
+
+        // Queue first page's sentences
+        *self.sentences.lock().unwrap() = sentences.clone();
+        for (i, s) in sentences.iter().enumerate() {
+            let _ = tx.send(SentenceJob {
+                sentence: s.clone(),
+                global_idx: i,
+                page_boundary: false,
+            });
+        }
+
         *self.state.lock().unwrap() = TtsState::Generating;
 
         let state = self.state.clone();
@@ -202,31 +246,21 @@ impl TtsEngine {
         let stream_holder = self._stream.clone();
         let gen_id = self.generation_id.clone();
         let playback = self.playback.clone();
-        let sentences_holder = self.sentences.clone();
+        let total_queued = self.total_queued.clone();
         let server_url = self.server_url.lock().unwrap().clone();
 
+        {
+            let mut pb = playback.lock().unwrap();
+            pb.playing_idx = 0;
+            pb.total = sentences.len();
+            pb.durations.clear();
+            pb.play_start = None;
+            pb.pause_start = None;
+            pb.paused_elapsed = Duration::ZERO;
+        }
+
         thread::spawn(move || {
-            // Check if we're still the current generation
             let is_current = || gen_id.load(Ordering::SeqCst) == my_gen;
-
-            let sentences = split_into_sentences(&text);
-            if sentences.is_empty() || !is_current() {
-                if is_current() { *state.lock().unwrap() = TtsState::Finished; }
-                return;
-            }
-
-            let total = sentences.len();
-            *sentences_holder.lock().unwrap() = sentences.clone();
-            {
-                let mut pb = playback.lock().unwrap();
-                pb.generating_idx = 0;
-                pb.playing_idx = 0;
-                pb.total = total;
-                pb.durations.clear();
-                pb.play_start = None;
-                pb.pause_start = None;
-                pb.paused_elapsed = Duration::ZERO;
-            }
 
             let stream_guard = stream_holder.lock().unwrap();
             let stream_ref = match stream_guard.as_ref() {
@@ -237,41 +271,63 @@ impl TtsEngine {
             sink.set_speed(speed);
             *sink_holder.lock().unwrap() = Some(sink);
 
-            for (i, sentence) in sentences.iter().enumerate() {
+            let mut first_played = false;
+            let mut success_count = 0usize;
+            let mut consecutive_failures = 0usize;
+
+            while let Ok(job) = rx.recv() {
                 if !is_current() { return; }
-                if i < skip_sentences {
+
+                if job.global_idx < skip_sentences {
                     playback.lock().unwrap().durations.push(0.0);
                     continue;
                 }
 
-                playback.lock().unwrap().generating_idx = i + 1;
+                // Notify page boundary
+                if job.page_boundary {
+                    let _ = page_tx.send(());
+                }
 
-                let wav_data = request_tts(&server_url, sentence, &voice, speed);
+                let wav_data = request_tts(&server_url, &job.sentence, &voice, speed);
 
                 if !is_current() { return; }
 
                 match wav_data {
                     Some((samples, sample_rate)) => {
+                        consecutive_failures = 0;
+                        success_count += 1;
                         let duration = samples.len() as f32 / sample_rate as f32 / speed;
-                        playback.lock().unwrap().durations.push(duration);
+                        {
+                            let mut pb = playback.lock().unwrap();
+                            pb.durations.push(duration);
+                            pb.total = *total_queued.lock().unwrap();
+                        }
 
                         let source = rodio::buffer::SamplesBuffer::new(1, sample_rate, samples);
                         if let Some(ref sink) = *sink_holder.lock().unwrap() {
                             sink.append(source);
                         }
-                        if i == skip_sentences {
+                        if !first_played {
                             playback.lock().unwrap().play_start = Some(Instant::now());
                             *state.lock().unwrap() = TtsState::Playing;
+                            first_played = true;
                         }
                     }
                     None => {
+                        consecutive_failures += 1;
                         playback.lock().unwrap().durations.push(0.0);
-                        eprintln!("TTS error for sentence {}/{}", i + 1, total);
+                        // If 3+ consecutive failures, server is probably down
+                        if consecutive_failures >= 3 {
+                            if is_current() {
+                                *state.lock().unwrap() = TtsState::Error("Server not reachable".into());
+                            }
+                            return;
+                        }
                     }
                 }
             }
 
-            // Wait for playback
+            // Channel closed (no more pages) — wait for playback to finish
             loop {
                 if !is_current() { return; }
                 let empty = sink_holder.lock().unwrap().as_ref().is_some_and(|s| s.empty());
@@ -286,13 +342,46 @@ impl TtsEngine {
         });
     }
 
+    /// Append another page's text to the running playback session.
+    /// Audio continues without interruption.
+    pub fn append_page(&self, text: String) {
+        let sentences = split_into_sentences(&text);
+        if sentences.is_empty() { return; }
+
+        // Add to sentence list for highlighting
+        let offset = {
+            let mut all = self.sentences.lock().unwrap();
+            let offset = all.len();
+            all.extend(sentences.iter().cloned());
+            offset
+        };
+
+        *self.total_queued.lock().unwrap() += sentences.len();
+
+        // Queue into channel — worker picks them up
+        if let Some(ref tx) = *self.sentence_tx.lock().unwrap() {
+            for (i, s) in sentences.iter().enumerate() {
+                let _ = tx.send(SentenceJob {
+                    sentence: s.clone(),
+                    global_idx: offset + i,
+                    page_boundary: i == 0,
+                });
+            }
+        }
+    }
+
+    /// Close the sentence channel — signals worker that no more pages are coming.
+    /// Call this when the book ends.
+    pub fn finish_session(&self) {
+        *self.sentence_tx.lock().unwrap() = None;
+    }
+
     pub fn precache_page(&self, _text: &str, _voice: &str) {}
 
     pub fn pause(&self) {
         if let Some(sink) = self.sink.lock().unwrap().as_ref() {
             sink.pause();
-            let mut pb = self.playback.lock().unwrap();
-            pb.pause_start = Some(Instant::now());
+            self.playback.lock().unwrap().pause_start = Some(Instant::now());
             *self.state.lock().unwrap() = TtsState::Paused;
         }
     }
@@ -301,8 +390,8 @@ impl TtsEngine {
         if let Some(sink) = self.sink.lock().unwrap().as_ref() {
             sink.play();
             let mut pb = self.playback.lock().unwrap();
-            if let Some(pause_start) = pb.pause_start.take() {
-                pb.paused_elapsed += pause_start.elapsed();
+            if let Some(ps) = pb.pause_start.take() {
+                pb.paused_elapsed += ps.elapsed();
             }
             *self.state.lock().unwrap() = TtsState::Playing;
         }
@@ -310,6 +399,7 @@ impl TtsEngine {
 
     pub fn stop(&self) {
         self.generation_id.fetch_add(1, Ordering::SeqCst);
+        *self.sentence_tx.lock().unwrap() = None; // close channel
         if let Some(sink) = self.sink.lock().unwrap().take() { sink.stop(); }
         *self.state.lock().unwrap() = TtsState::Idle;
     }
@@ -324,7 +414,6 @@ impl TtsEngine {
     }
 }
 
-/// Request TTS from Go server, returns (PCM f32 samples, sample_rate)
 fn request_tts(server_url: &str, text: &str, voice: &str, speed: f32) -> Option<(Vec<f32>, u32)> {
     let client = reqwest::blocking::Client::new();
     let resp = client
@@ -335,8 +424,6 @@ fn request_tts(server_url: &str, text: &str, voice: &str, speed: f32) -> Option<
     if !resp.status().is_success() { return None; }
     let wav = resp.bytes().ok()?;
     if wav.len() < 44 { return None; }
-
-    // Parse sample rate from WAV header (bytes 24-27)
     let sample_rate = u32::from_le_bytes([wav[24], wav[25], wav[26], wav[27]]);
     let num_samples = (wav.len() - 44) / 2;
     let mut samples = Vec::with_capacity(num_samples);

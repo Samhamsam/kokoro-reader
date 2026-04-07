@@ -70,12 +70,22 @@ class ServerTtsEngine(private var serverUrl: String) {
 
         speakJob = scope.launch {
             val producer = launch(Dispatchers.IO) {
+                var consecutiveFailures = 0
                 for ((i, sentence) in sentences.withIndex()) {
                     if (i < skipSentences) continue
                     if (!isCurrent()) return@launch
 
                     val wavData = requestTts(sentence, voiceId, speed)
-                    if (wavData == null || !isCurrent()) return@launch
+                    if (!isCurrent()) return@launch
+                    if (wavData == null) {
+                        consecutiveFailures++
+                        if (consecutiveFailures >= 3) {
+                            state = TtsState.ERROR
+                            return@launch
+                        }
+                        continue
+                    }
+                    consecutiveFailures = 0
 
                     val parsed = wavToSamples(wavData) ?: continue
                     pcmQueue.put(AudioChunk(i, parsed.first, parsed.second))

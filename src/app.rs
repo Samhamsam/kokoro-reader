@@ -268,20 +268,34 @@ impl App {
     fn start_reading(&mut self) {
         let voice = self.selected_voice.clone();
         let skip = self.resume_sentence;
-        self.resume_sentence = 0; // only resume once
+        self.resume_sentence = 0;
         self.tts.speak(self.page_text.clone(), voice, self.speed, skip);
         self.reading_active = true;
-        self.precache_next_page();
+        // Queue the next page's audio immediately — seamless transition
+        self.queue_next_page();
     }
 
-    fn precache_next_page(&self) {
+    /// Append next page's text to the running TTS session.
+    /// Audio continues without interruption across page boundaries.
+    fn queue_next_page(&self) {
         let next_page = self.current_page + 1;
         if let Some(ref pdf) = self.pdf {
             if next_page < pdf.page_count() {
                 if let Ok(text) = pdf.page_text(next_page) {
-                    let voice = &self.selected_voice;
-                    self.tts.precache_page(&text, voice);
+                    if !text.trim().is_empty() {
+                        self.tts.append_page(text);
+                    } else {
+                        // Empty page — try the one after
+                        if next_page + 1 < pdf.page_count() {
+                            if let Ok(text2) = pdf.page_text(next_page + 1) {
+                                self.tts.append_page(text2);
+                            }
+                        }
+                    }
                 }
+            } else {
+                // Last page — close the session so worker knows to finish
+                self.tts.finish_session();
             }
         }
     }
@@ -518,20 +532,34 @@ impl App {
             }
         }
 
-        // Auto-advance
-        if self.tts.state() == TtsState::Finished {
-            self.tts.clear_finished();
-            if self.reading_active {
-                let page_count = self.pdf.as_ref().map_or(0, |p| p.page_count());
-                if self.current_page + 1 < page_count {
-                    self.go_to_page(self.current_page + 1);
-                } else {
-                    self.reading_active = false;
+        // Page boundary: TTS worker crossed into next page's sentences.
+        // Advance the visual page and queue the page after that.
+        if self.reading_active && self.tts.check_page_boundary() {
+            let page_count = self.pdf.as_ref().map_or(0, |p| p.page_count());
+            if self.current_page + 1 < page_count {
+                self.current_page += 1;
+                // Render new page visually (synchronous, fast)
+                if let Some(ref pdf) = self.pdf {
+                    if let Ok(render) = pdf.render_page(self.current_page, 1200) {
+                        self.needs_render_data = Some(render);
+                    }
                 }
+                // Save progress
+                if let AppMode::Reader { ref book_id } = self.mode {
+                    self.library.update_progress(book_id, self.current_page, 0, &self.selected_voice);
+                }
+                // Queue the NEXT page after this one
+                self.queue_next_page();
             }
         }
 
-        if self.loading {
+        // Session fully finished (all pages done)
+        if self.tts.state() == TtsState::Finished {
+            self.tts.clear_finished();
+            self.reading_active = false;
+        }
+
+        if self.loading || self.reading_active {
             ctx.request_repaint();
         }
 

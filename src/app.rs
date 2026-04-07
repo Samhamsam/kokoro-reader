@@ -1,6 +1,6 @@
 use crate::library::Library;
 use crate::pdf::{PageRender, PdfDoc};
-use crate::tts::{TtsEngine, TtsState, VOICES};
+use crate::tts::{TtsEngine, TtsState, Voice, fetch_voices};
 use egui::{
     Color32, ColorImage, FontId, Pos2, Rect, RichText, Stroke, TextureHandle, Vec2,
 };
@@ -45,7 +45,8 @@ pub struct App {
     page_img_size: (usize, usize),
     zoom: f32,
     tts: TtsEngine,
-    selected_voice: usize,
+    voices: Vec<Voice>,
+    selected_voice: String,
     speed: f32,
     status_msg: String,
     reading_active: bool,
@@ -57,6 +58,7 @@ pub struct App {
     resume_sentence: usize,
     settings: crate::library::Settings,
     settings_path_input: String,
+    settings_server_input: String,
 }
 
 impl App {
@@ -100,8 +102,9 @@ impl App {
             page_text: String::new(),
             page_img_size: (0, 0),
             zoom: 1.0,
-            tts: TtsEngine::new(),
-            selected_voice: 0,
+            tts: TtsEngine::new(&settings.server_url),
+            voices: fetch_voices(&settings.server_url),
+            selected_voice: String::from("kokoro_heart"),
             speed: 1.0,
             status_msg: String::new(),
             reading_active: false,
@@ -113,6 +116,7 @@ impl App {
             resume_sentence: 0,
             settings: settings.clone(),
             settings_path_input: settings.data_dir.to_string_lossy().to_string(),
+            settings_server_input: settings.server_url.clone(),
         };
 
         // If launched with a PDF argument, import and open it
@@ -142,7 +146,7 @@ impl App {
         if let Some(book) = self.library.get(book_id) {
             let path = book.book_path(&self.library.data_dir);
             let start_page = book.last_page;
-            self.selected_voice = book.selected_voice;
+            self.selected_voice = book.selected_voice_id.clone();
             self.resume_sentence = book.last_sentence;
             self.mode = AppMode::Reader {
                 book_id: book_id.to_string(),
@@ -158,7 +162,7 @@ impl App {
         if let AppMode::Reader { ref book_id } = self.mode {
             let sentence = self.tts.current_sentences().1;
                 self.library
-                    .update_progress(book_id, self.current_page, sentence, self.selected_voice, VOICES[self.selected_voice].0);
+                    .update_progress(book_id, self.current_page, sentence, 0, &self.selected_voice);
         }
         self.pdf = None;
         self.page_texture = None;
@@ -234,7 +238,7 @@ impl App {
         self.page_text = text;
         self.page_img_size = (width, height);
         self.loading = false;
-        let voice = VOICES[self.selected_voice].0;
+        let voice = &self.selected_voice;
         self.tts.precache_page(&self.page_text, voice);
     }
 
@@ -251,13 +255,20 @@ impl App {
             }
             // Save progress
             if let AppMode::Reader { ref book_id } = self.mode {
-                self.library.update_progress(book_id, page, 0, self.selected_voice, VOICES[self.selected_voice].0);
+                self.library.update_progress(book_id, page, 0, 0, &self.selected_voice);
             }
         }
     }
 
+    fn voice_label(&self) -> String {
+        self.voices.iter()
+            .find(|v| v.id == self.selected_voice)
+            .map(|v| v.name.clone())
+            .unwrap_or_else(|| self.selected_voice.clone())
+    }
+
     fn start_reading(&mut self) {
-        let voice = VOICES[self.selected_voice].0.to_string();
+        let voice = self.selected_voice.clone();
         let skip = self.resume_sentence;
         self.resume_sentence = 0; // only resume once
         self.tts.speak(self.page_text.clone(), voice, self.speed, skip);
@@ -270,7 +281,7 @@ impl App {
         if let Some(ref pdf) = self.pdf {
             if next_page < pdf.page_count() {
                 if let Ok(text) = pdf.page_text(next_page) {
-                    let voice = VOICES[self.selected_voice].0;
+                    let voice = &self.selected_voice;
                     self.tts.precache_page(&text, voice);
                 }
             }
@@ -677,19 +688,19 @@ impl App {
                                 ui,
                                 RichText::new(format!(
                                     "Voice: {}",
-                                    VOICES[self.selected_voice].1
+                                    self.voice_label()
                                 ))
                                 .color(TEXT_PRIMARY),
                                 |ui| {
-                                    for (i, (_, label)) in VOICES.iter().enumerate() {
+                                    for voice in &self.voices {
                                         if ui
                                             .selectable_label(
-                                                self.selected_voice == i,
-                                                *label,
+                                                self.selected_voice == voice.id,
+                                                &voice.name,
                                             )
                                             .clicked()
                                         {
-                                            self.selected_voice = i;
+                                            self.selected_voice = voice.id.clone();
                                             ui.close_menu();
                                         }
                                     }
@@ -919,14 +930,34 @@ impl App {
                     }
                 });
 
+                ui.add_space(24.0);
+
+                // TTS Server
+                ui.label(RichText::new("TTS Server").color(TEXT_PRIMARY).strong());
+                ui.add_space(4.0);
+                ui.label(RichText::new("URL of the Go TTS server (kokoro-server).").color(TEXT_DIM).small());
+                ui.add_space(8.0);
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.settings_server_input)
+                        .desired_width(ui.available_width())
+                        .font(FontId::proportional(14.0)),
+                );
+
                 ui.add_space(16.0);
 
-                let changed = self.settings_path_input != self.settings.data_dir.to_string_lossy();
-                if changed {
+                let path_changed = self.settings_path_input != self.settings.data_dir.to_string_lossy();
+                let server_changed = self.settings_server_input != self.settings.server_url;
+                if path_changed || server_changed {
                     if styled_button(ui, "Save & Apply", ACCENT).clicked() {
                         self.settings.data_dir = PathBuf::from(&self.settings_path_input);
+                        self.settings.server_url = self.settings_server_input.clone();
                         crate::library::save_settings(&self.settings);
                         self.library = Library::load(&self.settings.data_dir);
+                        self.tts.set_server_url(&self.settings.server_url);
+                        self.voices = fetch_voices(&self.settings.server_url);
+                        if !self.voices.is_empty() {
+                            self.selected_voice = self.voices[0].id.clone();
+                        }
                         self.mode = AppMode::Library;
                     }
                 }

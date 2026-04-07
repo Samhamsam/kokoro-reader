@@ -41,12 +41,19 @@ pub fn save_settings(settings: &Settings) {
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Settings {
     pub data_dir: PathBuf,
+    #[serde(default = "default_server_url")]
+    pub server_url: String,
+}
+
+fn default_server_url() -> String {
+    "http://localhost:8787".to_string()
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
             data_dir: default_data_dir(),
+            server_url: default_server_url(),
         }
     }
 }

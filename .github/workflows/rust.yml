@@ -21,9 +21,11 @@ jobs:
       - name: Download pdfium
         run: |
           mkdir -p lib/lib
-          curl -L -o /tmp/pdfium.tgz https://github.com/nicehash/pdfium-binaries/releases/download/v129.0.6668.0/pdfium-linux-x64.tgz
-          tar -xzf /tmp/pdfium.tgz -C /tmp/pdfium-extract || true
-          find /tmp -name "libpdfium.so" -exec cp {} lib/lib/libpdfium.so \;
+          curl -L -o /tmp/pdfium.tgz https://github.com/nicehash/pdfium-binaries/releases/latest/download/pdfium-linux-x64.tgz \
+            || curl -L -o /tmp/pdfium.tgz https://github.com/bblanchon/pdfium-binaries/releases/latest/download/pdfium-linux-x64.tgz
+          mkdir -p /tmp/pdfium-extract
+          tar -xzf /tmp/pdfium.tgz -C /tmp/pdfium-extract
+          cp /tmp/pdfium-extract/lib/libpdfium.so lib/lib/libpdfium.so
           ls -la lib/lib/
 
       - uses: dtolnay/rust-toolchain@stable

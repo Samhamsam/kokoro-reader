@@ -193,12 +193,17 @@ class TtsEngine(context: Context) {
                 .replace(",,", ",").replace(", ,", ",")
         }
 
+        /** Apply TTS preprocessing to a single sentence before sending to server */
+        fun prepareForServer(text: String): String = prepareForTts(text)
+
         fun splitIntoSentences(text: String): List<String> {
-            val cleaned = prepareForTts(text
+            // NOTE: prepareForTts NOT applied here — keeps original text for display.
+            // Applied per-sentence in ServerTtsEngine before sending to server.
+            val cleaned = text
                 .replace(Regex("[\\p{Cntrl}]"), " ")
                 .replace(Regex("[♦♣♠♥★☆●○◆◇■□▪▫▲△▼▽•‣⁃※†‡§¶]"), " ")
                 .replace(Regex("\\s+"), " ")
-                .trim())
+                .trim()
 
             if (cleaned.isEmpty()) return emptyList()
 

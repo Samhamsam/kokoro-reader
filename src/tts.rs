@@ -77,7 +77,8 @@ fn is_abbreviation(text: &str) -> bool {
 
 pub fn split_into_sentences(text: &str) -> Vec<String> {
     let text = clean_text(text);
-    let text = prepare_for_tts(&text);
+    // NOTE: prepare_for_tts is NOT applied here — it's applied per-sentence
+    // before sending to TTS server. This keeps original text for highlighting.
     if text.is_empty() { return vec![]; }
     let mut sentences = Vec::new();
     let mut current = String::new();
@@ -317,14 +318,12 @@ impl TtsEngine {
             let mut consecutive_failures = 0usize;
 
             loop {
-                let job = match rx.recv_timeout(Duration::from_secs(30)) {
+                // Wait indefinitely for next sentence — only break on channel close
+                // (finish_session() or stop() closes the channel)
+                let job = match rx.recv() {
                     Ok(j) => j,
-                    Err(mpsc::RecvTimeoutError::Timeout) => {
-                        eprintln!("[TTS] recv timeout — no more sentences after 30s");
-                        break;
-                    }
-                    Err(mpsc::RecvTimeoutError::Disconnected) => {
-                        eprintln!("[TTS] channel disconnected (session closed)");
+                    Err(_) => {
+                        eprintln!("[TTS] channel closed (session ended)");
                         break;
                     }
                 };
@@ -339,7 +338,9 @@ impl TtsEngine {
                     continue;
                 }
 
-                let wav_data = request_tts(&server_url, &job.sentence, &voice, speed);
+                // Apply TTS preprocessing per-sentence (not stored — keeps original for highlighting)
+                let tts_text = prepare_for_tts(&job.sentence);
+                let wav_data = request_tts(&server_url, &tts_text, &voice, speed);
 
                 if !is_current() { return; }
 

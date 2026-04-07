@@ -4,6 +4,13 @@ use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
+fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
 fn data_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     Path::new(&home).join(".local/share/kokoro-reader")
@@ -24,7 +31,10 @@ pub struct BookEntry {
     pub filename: String,
     pub total_pages: usize,
     pub last_page: usize,
+    pub last_sentence: usize,
     pub selected_voice: usize,
+    #[serde(default)]
+    pub last_accessed: u64, // unix timestamp
 }
 
 impl BookEntry {
@@ -32,11 +42,11 @@ impl BookEntry {
         if self.total_pages == 0 {
             return 0.0;
         }
-        (self.last_page + 1) as f32 / self.total_pages as f32
+        self.last_page as f32 / self.total_pages as f32
     }
 
     pub fn progress_percent(&self) -> u32 {
-        (self.progress() * 100.0) as u32
+        (self.progress() * 100.0).round() as u32
     }
 
     pub fn book_path(&self) -> PathBuf {
@@ -124,7 +134,9 @@ impl Library {
             filename,
             total_pages,
             last_page: 0,
+            last_sentence: 0,
             selected_voice: 0,
+            last_accessed: now(),
         };
 
         self.books.push(entry);
@@ -140,10 +152,12 @@ impl Library {
         }
     }
 
-    pub fn update_progress(&mut self, id: &str, page: usize, voice: usize) {
+    pub fn update_progress(&mut self, id: &str, page: usize, sentence: usize, voice: usize) {
         if let Some(book) = self.books.iter_mut().find(|b| b.id == id) {
             book.last_page = page;
+            book.last_sentence = sentence;
             book.selected_voice = voice;
+            book.last_accessed = now();
             self.save();
         }
     }

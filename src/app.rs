@@ -53,6 +53,7 @@ pub struct App {
     render_tx: mpsc::Sender<RenderResult>,
     loading: bool,
     needs_render_data: Option<PageRender>,
+    resume_sentence: usize,
 }
 
 impl App {
@@ -105,14 +106,13 @@ impl App {
             render_tx,
             loading: false,
             needs_render_data: None,
+            resume_sentence: 0,
         };
 
         // If launched with a PDF argument, import and open it
         if let Some(path) = initial_pdf {
             let pb = PathBuf::from(&path);
-            if let Ok(id) = app.library.import(&pb) {
-                app.open_book(&id);
-            }
+            app.library.import(&pb).ok(); // import only, stay in library
         }
 
         app
@@ -126,7 +126,7 @@ impl App {
             .pick_file()
         {
             match self.library.import(&path) {
-                Ok(id) => self.open_book(&id),
+                Ok(_) => {} // stays in library view, book appears at top
                 Err(e) => self.status_msg = format!("Import error: {}", e),
             }
         }
@@ -137,6 +137,7 @@ impl App {
             let path = book.book_path();
             let start_page = book.last_page;
             self.selected_voice = book.selected_voice;
+            self.resume_sentence = book.last_sentence;
             self.mode = AppMode::Reader {
                 book_id: book_id.to_string(),
             };
@@ -149,8 +150,9 @@ impl App {
         self.reading_active = false;
         // Save current progress
         if let AppMode::Reader { ref book_id } = self.mode {
-            self.library
-                .update_progress(book_id, self.current_page, self.selected_voice);
+            let sentence = self.tts.current_sentences().1;
+                self.library
+                    .update_progress(book_id, self.current_page, sentence, self.selected_voice);
         }
         self.pdf = None;
         self.page_texture = None;
@@ -243,14 +245,16 @@ impl App {
             }
             // Save progress
             if let AppMode::Reader { ref book_id } = self.mode {
-                self.library.update_progress(book_id, page, self.selected_voice);
+                self.library.update_progress(book_id, page, 0, self.selected_voice);
             }
         }
     }
 
     fn start_reading(&mut self) {
         let voice = VOICES[self.selected_voice].0.to_string();
-        self.tts.speak(self.page_text.clone(), voice, self.speed);
+        let skip = self.resume_sentence;
+        self.resume_sentence = 0; // only resume once
+        self.tts.speak(self.page_text.clone(), voice, self.speed, skip);
         self.reading_active = true;
         self.precache_next_page();
     }
@@ -331,21 +335,23 @@ impl App {
                     return;
                 }
 
-                // Book list
+                // Sort books by last accessed (most recent first)
                 let query = self.search_query.to_lowercase();
+                let mut sorted_books: Vec<_> = self.library.books.iter()
+                    .filter(|b| query.is_empty() || b.title.to_lowercase().contains(&query))
+                    .collect();
+                sorted_books.sort_by(|a, b| b.last_accessed.cmp(&a.last_accessed));
+
                 let mut open_id: Option<String> = None;
                 let mut delete_id: Option<String> = None;
 
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    for book in &self.library.books {
-                        if !query.is_empty() && !book.title.to_lowercase().contains(&query) {
-                            continue;
-                        }
-
+                    for book in &sorted_books {
                         let progress = book.progress();
                         let pct = book.progress_percent();
+                        let book_id = book.id.clone();
 
-                        ui.push_id(&book.id, |ui| {
+                        ui.push_id(&book_id, |ui| {
                             let frame = egui::Frame::new()
                                 .fill(SURFACE)
                                 .corner_radius(egui::CornerRadius::same(8))
@@ -353,93 +359,91 @@ impl App {
                                 .stroke(Stroke::new(1.0, Color32::from_rgb(45, 47, 60)));
 
                             frame.show(ui, |ui| {
+                                // Title row
                                 ui.horizontal(|ui| {
-                                    // Book info (clickable)
-                                    let response = ui
-                                        .vertical(|ui| {
-                                            ui.set_min_width(ui.available_width() - 80.0);
-                                            ui.label(
-                                                RichText::new(&book.title)
-                                                    .font(FontId::proportional(16.0))
-                                                    .color(TEXT_PRIMARY)
-                                                    .strong(),
-                                            );
-                                            ui.add_space(6.0);
-
-                                            // Progress bar
-                                            let bar_height = 6.0;
-                                            let bar_width = ui.available_width();
-                                            let (rect, _) = ui.allocate_exact_size(
-                                                Vec2::new(bar_width, bar_height),
-                                                egui::Sense::hover(),
-                                            );
-                                            ui.painter().rect_filled(
-                                                rect,
-                                                egui::CornerRadius::same(3),
-                                                PROGRESS_BG,
-                                            );
-                                            let filled = Rect::from_min_size(
-                                                rect.min,
-                                                Vec2::new(bar_width * progress, bar_height),
-                                            );
-                                            ui.painter().rect_filled(
-                                                filled,
-                                                egui::CornerRadius::same(3),
-                                                ACCENT,
-                                            );
-
-                                            ui.add_space(4.0);
-                                            ui.label(
-                                                RichText::new(format!(
-                                                    "{}%  —  Page {} / {}",
-                                                    pct,
-                                                    book.last_page + 1,
-                                                    book.total_pages
-                                                ))
-                                                .color(TEXT_DIM)
-                                                .small(),
-                                            );
-                                        })
-                                        .response;
-
-                                    if response.interact(egui::Sense::click()).clicked() {
-                                        open_id = Some(book.id.clone());
+                                    // Clickable title area
+                                    let title_resp = ui.add(
+                                        egui::Label::new(
+                                            RichText::new(&book.title)
+                                                .font(FontId::proportional(16.0))
+                                                .color(TEXT_PRIMARY)
+                                                .strong(),
+                                        ).sense(egui::Sense::click())
+                                    );
+                                    if title_resp.clicked() {
+                                        open_id = Some(book_id.clone());
                                     }
 
-                                    // Delete button
-                                    ui.with_layout(
-                                        egui::Layout::right_to_left(egui::Align::Center),
-                                        |ui| {
-                                            if ui
-                                                .add(
-                                                    egui::Button::new(
-                                                        RichText::new("X")
-                                                            .color(RED)
-                                                            .strong(),
-                                                    )
-                                                    .fill(Color32::TRANSPARENT),
-                                                )
-                                                .clicked()
-                                            {
-                                                delete_id = Some(book.id.clone());
-                                            }
-                                        },
-                                    );
+                                    // Spacer + delete button on far right
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        if ui.add(
+                                            egui::Button::new(RichText::new("Delete").color(RED).small())
+                                                .fill(Color32::TRANSPARENT)
+                                        ).clicked() {
+                                            delete_id = Some(book_id.clone());
+                                        }
+                                    });
                                 });
+
+                                ui.add_space(6.0);
+
+                                // Clickable progress area
+                                let progress_resp = ui.vertical(|ui| {
+                                    // Progress bar
+                                    let bar_height = 6.0;
+                                    let bar_width = ui.available_width();
+                                    let (rect, _) = ui.allocate_exact_size(
+                                        Vec2::new(bar_width, bar_height),
+                                        egui::Sense::hover(),
+                                    );
+                                    ui.painter().rect_filled(rect, egui::CornerRadius::same(3), PROGRESS_BG);
+                                    let filled = Rect::from_min_size(
+                                        rect.min,
+                                        Vec2::new(bar_width * progress, bar_height),
+                                    );
+                                    ui.painter().rect_filled(filled, egui::CornerRadius::same(3), ACCENT);
+
+                                    ui.add_space(4.0);
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "{}%  —  Page {} / {}",
+                                            pct, book.last_page + 1, book.total_pages
+                                        ))
+                                        .color(TEXT_DIM)
+                                        .small(),
+                                    );
+                                }).response;
+
+                                if progress_resp.interact(egui::Sense::click()).clicked() {
+                                    open_id = Some(book.id.clone());
+                                }
                             });
+
                             ui.add_space(6.0);
                         });
                     }
                 });
 
+                // Confirm delete via native OS dialog
+                if let Some(id) = delete_id {
+                    open_id = None;
+                    let confirmed = rfd::MessageDialog::new()
+                        .set_title("Delete Book")
+                        .set_description("Are you sure you want to delete this book?")
+                        .set_buttons(rfd::MessageButtons::YesNo)
+                        .set_level(rfd::MessageLevel::Warning)
+                        .show();
+                    if confirmed == rfd::MessageDialogResult::Yes {
+                        self.library.delete(&id);
+                    }
+                }
+
                 // Process actions after iteration
                 if let Some(id) = open_id {
                     self.open_book(&id);
                 }
-                if let Some(id) = delete_id {
-                    self.library.delete(&id);
-                }
             });
+
     }
 
     fn show_reader(&mut self, ctx: &egui::Context) {

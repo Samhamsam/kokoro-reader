@@ -131,18 +131,19 @@ impl PdfDoc {
 
         // Find where the next sentence starts — that's our end boundary
         let all_chars = page_text.chars();
+        // Fallback: use sentence length + small padding (never highlight the whole page)
+        let fallback_end = (start_char_idx + sentence.chars().count() + 3).min(all_chars.len());
         let end_char_idx = if let Some(next) = next_sentence {
             let next_prefix: String = next.chars().take(40).collect();
             let next_prefix = next_prefix.trim();
             if !next_prefix.is_empty() {
                 find_text_start(&page_text, next_prefix)
-                    .unwrap_or(all_chars.len())
+                    .unwrap_or(fallback_end)
             } else {
-                all_chars.len()
+                fallback_end
             }
         } else {
-            // Last sentence — go to end of page
-            all_chars.len()
+            fallback_end
         };
 
         let mut rects = Vec::new();

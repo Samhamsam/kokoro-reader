@@ -25,7 +25,7 @@ fn piper_phonemize(text: &str, voice_name: &str) -> String {
         &voice_name[..2]
     };
 
-    let phonemes = espeak_rs::text_to_phonemes(text, espeak_voice, None, false, false)
+    let phonemes = espeak_rs::text_to_phonemes(text, espeak_voice, None, true, false)
         .unwrap_or_default();
     let ipa = phonemes.join(" ");
 
@@ -460,7 +460,7 @@ impl TtsEngine {
         pb.playing_idx = pb.durations.len().saturating_sub(1);
     }
 
-    pub fn speak(&self, text: String, voice: String, speed: f32) {
+    pub fn speak(&self, text: String, voice: String, speed: f32, skip_sentences: usize) {
         self.stop();
 
         if !*self.model_ready.lock().unwrap() {
@@ -513,6 +513,12 @@ impl TtsEngine {
             *sink_holder.lock().unwrap() = Some(sink);
 
             for (i, sentence) in sentences.iter().enumerate() {
+                // Skip sentences the user already heard
+                if i < skip_sentences {
+                    playback.lock().unwrap().durations.push(0.0);
+                    continue;
+                }
+
                 if *stop_flag.lock().unwrap() {
                     break;
                 }

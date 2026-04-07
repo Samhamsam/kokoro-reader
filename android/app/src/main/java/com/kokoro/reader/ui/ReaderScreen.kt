@@ -19,8 +19,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.kokoro.reader.data.Library
-import com.kokoro.reader.tts.TtsEngine
+import com.kokoro.reader.tts.SherpaOnnxTts
 import com.kokoro.reader.tts.TtsState
+import com.kokoro.reader.tts.VoiceType
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -45,9 +46,16 @@ fun ReaderScreen(
     var pageText by remember { mutableStateOf("") }
     var loading by remember { mutableStateOf(true) }
     var speed by remember { mutableFloatStateOf(1.0f) }
+    var selectedVoice by remember {
+        val savedId = book.selected_voice_id
+        val voice = VoiceType.entries.find { it.name == savedId } ?: VoiceType.KOKORO_HEART
+        mutableStateOf(voice)
+    }
+    var voiceMenuExpanded by remember { mutableStateOf(false) }
 
-    // TTS
-    val ttsEngine = remember { TtsEngine(context) }
+    // TTS — use app's internal storage for model cache
+    val modelsDir = remember { File(context.filesDir, "tts-models") }
+    val ttsEngine = remember { SherpaOnnxTts(modelsDir) }
     var ttsState by remember { mutableStateOf(TtsState.IDLE) }
     var currentSentenceIdx by remember { mutableIntStateOf(0) }
     var readingActive by remember { mutableStateOf(false) }
@@ -70,31 +78,26 @@ fun ReaderScreen(
     // Render page
     LaunchedEffect(currentPage) {
         loading = true
-        val result = withContext(Dispatchers.IO) {
-            renderPage(pdfFile, currentPage)
-        }
+        val result = withContext(Dispatchers.IO) { renderPage(pdfFile, currentPage) }
         bitmap = result?.first
         pageText = result?.second ?: ""
         loading = false
 
-        // Update total pages
         if (totalPages == 0) {
             totalPages = withContext(Dispatchers.IO) { getPageCount(pdfFile) }
         }
 
-        // Save progress
-        library.updateProgress(bookId, currentPage, 0, book.selected_voice)
+        library.updateProgress(bookId, currentPage, 0, selectedVoice.name)
 
-        // Auto-read if reading active
         if (readingActive && pageText.isNotBlank()) {
-            ttsEngine.speak(pageText, onStateChange)
+            ttsEngine.speak(pageText, selectedVoice, speed, onStateChange = onStateChange)
         }
     }
 
     DisposableEffect(Unit) {
         onDispose {
             ttsEngine.stop()
-            library.updateProgress(bookId, currentPage, ttsEngine.currentSentence, book.selected_voice)
+            library.updateProgress(bookId, currentPage, ttsEngine.currentSentence, selectedVoice.name)
         }
     }
 
@@ -105,18 +108,15 @@ fun ReaderScreen(
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         TextButton(onClick = {
                             ttsEngine.stop()
-                            library.updateProgress(bookId, currentPage, ttsEngine.currentSentence, book.selected_voice)
+                            library.updateProgress(bookId, currentPage, ttsEngine.currentSentence, selectedVoice.name)
                             onBack()
-                        }) {
-                            Text("< Library", color = TextPrimary)
-                        }
+                        }) { Text("< Library", color = TextPrimary) }
+
                         Spacer(Modifier.width(8.dp))
 
-                        // Page nav
                         IconButton(
                             onClick = {
-                                ttsEngine.stop()
-                                readingActive = false
+                                ttsEngine.stop(); readingActive = false
                                 if (currentPage > 0) currentPage--
                             },
                             enabled = currentPage > 0
@@ -126,8 +126,7 @@ fun ReaderScreen(
 
                         IconButton(
                             onClick = {
-                                ttsEngine.stop()
-                                readingActive = false
+                                ttsEngine.stop(); readingActive = false
                                 if (currentPage + 1 < totalPages) currentPage++
                             },
                             enabled = currentPage + 1 < totalPages
@@ -138,79 +137,132 @@ fun ReaderScreen(
             )
         },
         bottomBar = {
-            // TTS Controls
             Surface(color = Surface, tonalElevation = 4.dp) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    when (ttsState) {
-                        TtsState.IDLE, TtsState.FINISHED, TtsState.ERROR -> {
-                            Button(
-                                onClick = {
-                                    readingActive = true
-                                    ttsEngine.setSpeed(speed)
-                                    ttsEngine.speak(pageText, onStateChange)
-                                },
-                                enabled = pageText.isNotBlank(),
-                                colors = ButtonDefaults.buttonColors(containerColor = Green)
-                            ) { Text("Play") }
+                Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+                    // TTS Controls
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        when (ttsState) {
+                            TtsState.IDLE, TtsState.FINISHED, TtsState.ERROR -> {
+                                Button(
+                                    onClick = {
+                                        readingActive = true
+                                        ttsEngine.speak(pageText, selectedVoice, speed, onStateChange = onStateChange)
+                                    },
+                                    enabled = pageText.isNotBlank(),
+                                    colors = ButtonDefaults.buttonColors(containerColor = Green)
+                                ) { Text("Play") }
+                            }
+                            TtsState.GENERATING -> {
+                                val progress = ttsEngine.downloadProgress
+                                if (progress > 0f && progress < 1f) {
+                                    CircularProgressIndicator(
+                                        progress = { progress },
+                                        modifier = Modifier.size(24.dp),
+                                        color = Amber,
+                                        strokeWidth = 2.dp
+                                    )
+                                    Text(
+                                        "Downloading ${(progress * 100).toInt()}%",
+                                        color = Amber,
+                                        fontSize = 12.sp
+                                    )
+                                } else {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(24.dp),
+                                        color = Amber,
+                                        strokeWidth = 2.dp
+                                    )
+                                    Text("Loading model...", color = Amber, fontSize = 12.sp)
+                                }
+                            }
+                            TtsState.PLAYING -> {
+                                Button(
+                                    onClick = { ttsEngine.pause(); onStateChange() },
+                                    colors = ButtonDefaults.buttonColors(containerColor = Amber)
+                                ) { Text("Pause") }
+                                Button(
+                                    onClick = { ttsEngine.stop(); readingActive = false; onStateChange() },
+                                    colors = ButtonDefaults.buttonColors(containerColor = Red)
+                                ) { Text("Stop") }
+                            }
+                            TtsState.PAUSED -> {
+                                Button(
+                                    onClick = { ttsEngine.resume(onStateChange) },
+                                    colors = ButtonDefaults.buttonColors(containerColor = Green)
+                                ) { Text("Resume") }
+                                Button(
+                                    onClick = { ttsEngine.stop(); readingActive = false; onStateChange() },
+                                    colors = ButtonDefaults.buttonColors(containerColor = Red)
+                                ) { Text("Stop") }
+                            }
                         }
-                        TtsState.PLAYING, TtsState.GENERATING -> {
-                            Button(
-                                onClick = { ttsEngine.pause(); onStateChange() },
-                                colors = ButtonDefaults.buttonColors(containerColor = Amber)
-                            ) { Text("Pause") }
-                            Button(
-                                onClick = {
-                                    ttsEngine.stop()
-                                    readingActive = false
-                                    onStateChange()
-                                },
-                                colors = ButtonDefaults.buttonColors(containerColor = Red)
-                            ) { Text("Stop") }
-                        }
-                        TtsState.PAUSED -> {
-                            Button(
-                                onClick = { ttsEngine.resume(onStateChange) },
-                                colors = ButtonDefaults.buttonColors(containerColor = Green)
-                            ) { Text("Resume") }
-                            Button(
-                                onClick = {
-                                    ttsEngine.stop()
-                                    readingActive = false
-                                    onStateChange()
-                                },
-                                colors = ButtonDefaults.buttonColors(containerColor = Red)
-                            ) { Text("Stop") }
+
+                        Spacer(Modifier.weight(1f))
+
+                        // Voice selector
+                        Box {
+                            TextButton(onClick = { voiceMenuExpanded = true }) {
+                                Text(selectedVoice.label, color = TextPrimary, fontSize = 12.sp)
+                            }
+                            DropdownMenu(
+                                expanded = voiceMenuExpanded,
+                                onDismissRequest = { voiceMenuExpanded = false }
+                            ) {
+                                VoiceType.entries.forEach { voice ->
+                                    val downloaded = voice.isDownloaded(modelsDir)
+                                    DropdownMenuItem(
+                                        text = {
+                                            Row(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                horizontalArrangement = Arrangement.SpaceBetween
+                                            ) {
+                                                Text(voice.label)
+                                                if (!downloaded) {
+                                                    Text(
+                                                        "${voice.sizeMB} MB",
+                                                        color = TextDim,
+                                                        fontSize = 11.sp
+                                                    )
+                                                }
+                                            }
+                                        },
+                                        onClick = {
+                                            selectedVoice = voice
+                                            voiceMenuExpanded = false
+                                        },
+                                        leadingIcon = if (downloaded) {
+                                            { Text("✓", color = Green, fontSize = 14.sp) }
+                                        } else null
+                                    )
+                                }
+                            }
                         }
                     }
 
-                    Spacer(Modifier.weight(1f))
-
-                    // Speed
-                    Text("${String.format("%.1f", speed)}x", color = TextDim, fontSize = 12.sp)
-                    Slider(
-                        value = speed,
-                        onValueChange = {
-                            speed = it
-                            ttsEngine.setSpeed(it)
-                        },
-                        valueRange = 0.5f..2.0f,
-                        steps = 5,
-                        modifier = Modifier.width(100.dp)
-                    )
+                    // Speed slider
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Speed: ${String.format("%.1f", speed)}x", color = TextDim, fontSize = 12.sp)
+                        Slider(
+                            value = speed,
+                            onValueChange = { speed = it },
+                            valueRange = 0.5f..2.0f,
+                            steps = 5,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
                 }
             }
         }
     ) { padding ->
         Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding),
+            modifier = Modifier.fillMaxSize().padding(padding),
             contentAlignment = Alignment.TopCenter
         ) {
             if (loading) {
@@ -218,12 +270,7 @@ fun ReaderScreen(
                     CircularProgressIndicator(color = Accent)
                 }
             } else {
-                Column(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .verticalScroll(rememberScrollState())
-                ) {
-                    // PDF Page
+                Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
                     bitmap?.let { bmp ->
                         Image(
                             bitmap = bmp.asImageBitmap(),
@@ -232,23 +279,14 @@ fun ReaderScreen(
                         )
                     }
 
-                    // Current sentence indicator
+                    // Current sentence
                     if (ttsState == TtsState.PLAYING || ttsState == TtsState.PAUSED) {
                         ttsEngine.getCurrentSentenceText()?.let { sentence ->
                             Card(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(8.dp),
-                                colors = CardDefaults.cardColors(
-                                    containerColor = Accent.copy(alpha = 0.15f)
-                                )
+                                modifier = Modifier.fillMaxWidth().padding(8.dp),
+                                colors = CardDefaults.cardColors(containerColor = Accent.copy(alpha = 0.15f))
                             ) {
-                                Text(
-                                    sentence,
-                                    modifier = Modifier.padding(12.dp),
-                                    color = TextPrimary,
-                                    fontSize = 14.sp
-                                )
+                                Text(sentence, modifier = Modifier.padding(12.dp), color = TextPrimary, fontSize = 14.sp)
                             }
                         }
                     }
@@ -266,13 +304,13 @@ private fun renderPage(file: File, pageIndex: Int): Pair<Bitmap, String>? {
         val page = renderer.openPage(idx)
 
         val scale = 2
-        val bitmap = Bitmap.createBitmap(
-            page.width * scale, page.height * scale, Bitmap.Config.ARGB_8888
-        )
+        val bitmap = Bitmap.createBitmap(page.width * scale, page.height * scale, Bitmap.Config.ARGB_8888)
         bitmap.eraseColor(android.graphics.Color.WHITE)
         page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+        page.close()
+        renderer.close()
+        fd.close()
 
-        // Extract text using PDFBox
         val text = try {
             val doc = PDDocument.load(file)
             val stripper = PDFTextStripper()
@@ -283,9 +321,6 @@ private fun renderPage(file: File, pageIndex: Int): Pair<Bitmap, String>? {
             t.trim()
         } catch (e: Exception) { "" }
 
-        page.close()
-        renderer.close()
-        fd.close()
         Pair(bitmap, text)
     } catch (e: Exception) {
         e.printStackTrace()

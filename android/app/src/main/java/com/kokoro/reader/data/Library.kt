@@ -74,13 +74,13 @@ class Library(private val dataDir: File) {
         }
     }
 
-    fun updateProgress(id: String, page: Int, sentence: Int, voice: Int) {
+    fun updateProgress(id: String, page: Int, sentence: Int, voiceId: String) {
         books.find { it.id == id }?.let { book ->
             val idx = books.indexOf(book)
             books[idx] = book.copy(
                 last_page = page,
                 last_sentence = sentence,
-                selected_voice = voice,
+                selected_voice_id = voiceId,
                 last_accessed = System.currentTimeMillis() / 1000
             )
             save()

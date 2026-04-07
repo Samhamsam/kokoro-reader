@@ -61,6 +61,8 @@ pub struct BookEntry {
     pub last_sentence: usize,
     pub selected_voice: usize,
     #[serde(default)]
+    pub selected_voice_id: String,
+    #[serde(default)]
     pub last_accessed: u64, // unix timestamp
 }
 
@@ -164,6 +166,7 @@ impl Library {
             last_page: 0,
             last_sentence: 0,
             selected_voice: 0,
+            selected_voice_id: String::new(),
             last_accessed: now(),
         };
 
@@ -180,11 +183,12 @@ impl Library {
         }
     }
 
-    pub fn update_progress(&mut self, id: &str, page: usize, sentence: usize, voice: usize) {
+    pub fn update_progress(&mut self, id: &str, page: usize, sentence: usize, voice: usize, voice_id: &str) {
         if let Some(book) = self.books.iter_mut().find(|b| b.id == id) {
             book.last_page = page;
             book.last_sentence = sentence;
             book.selected_voice = voice;
+            book.selected_voice_id = voice_id.to_string();
             book.last_accessed = now();
             self.save();
         }

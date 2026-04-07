@@ -158,7 +158,7 @@ impl App {
         if let AppMode::Reader { ref book_id } = self.mode {
             let sentence = self.tts.current_sentences().1;
                 self.library
-                    .update_progress(book_id, self.current_page, sentence, self.selected_voice);
+                    .update_progress(book_id, self.current_page, sentence, self.selected_voice, VOICES[self.selected_voice].0);
         }
         self.pdf = None;
         self.page_texture = None;
@@ -251,7 +251,7 @@ impl App {
             }
             // Save progress
             if let AppMode::Reader { ref book_id } = self.mode {
-                self.library.update_progress(book_id, page, 0, self.selected_voice);
+                self.library.update_progress(book_id, page, 0, self.selected_voice, VOICES[self.selected_voice].0);
             }
         }
     }

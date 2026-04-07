@@ -67,11 +67,13 @@ class ServerTtsEngine(private var serverUrl: String) {
      * Call appendPage() to add more pages, finishSession() when book ends.
      */
     fun speak(text: String, voiceId: String, speed: Float, skipSentences: Int = 0) {
+        android.util.Log.i("KokoroTTS", "speak() called: voice=$voiceId textLen=${text.length}")
         val myGen = generationId.incrementAndGet()
         speakJob?.cancel()
         paused = false
 
         val splitSentences = TtsEngine.splitIntoSentences(text)
+        android.util.Log.i("KokoroTTS", "speak() sentences=${splitSentences.size}")
         if (splitSentences.isEmpty()) { state = TtsState.FINISHED; return }
 
         sentences = splitSentences.toMutableList()
@@ -80,10 +82,10 @@ class ServerTtsEngine(private var serverUrl: String) {
         pageBoundaryIndices.clear()
         boundariesSignaled = 0
 
-        val queue = LinkedBlockingQueue<SentenceJob>(20)
+        // Unbounded queue — sentences are lightweight, audio chunks are bounded separately
+        val queue = LinkedBlockingQueue<SentenceJob>()
         sentenceQueue = queue
 
-        // Queue first page's sentences
         for ((i, s) in splitSentences.withIndex()) {
             queue.put(SentenceJob(s, i, isPageBoundary = false))
         }

@@ -215,22 +215,26 @@ fun ReaderScreen(
                             TtsState.IDLE, TtsState.FINISHED, TtsState.ERROR -> {
                                 Button(
                                     onClick = {
-                                        lastQueuedPage = currentPage
-                                        ttsEngine.speak(pageText, selectedVoice, speed)
+                                        val textToSpeak = pageText
+                                        val voiceToUse = selectedVoice
+                                        val curPage = currentPage
+                                        android.util.Log.i("KokoroReader", "PLAY clicked: page=$curPage voice=$voiceToUse textLen=${textToSpeak.length} connected=$serverConnected")
                                         readingActive = true
-                                        // Queue next 2 pages on IO thread
-                                        coroutineScope.launch {
+                                        lastQueuedPage = curPage
+                                        coroutineScope.launch(Dispatchers.IO) {
+                                            android.util.Log.i("KokoroReader", "IO: calling speak()")
+                                            ttsEngine.speak(textToSpeak, voiceToUse, speed)
+                                            android.util.Log.i("KokoroReader", "IO: speak() returned")
                                             val file = pdfFile ?: return@launch
-                                            withContext(Dispatchers.IO) {
-                                                for (n in 1..2) {
-                                                    if (lastQueuedPage + 1 < totalPages) {
-                                                        lastQueuedPage++
-                                                        val t = extractPageText(file, lastQueuedPage)
-                                                        if (t.isNotBlank()) ttsEngine.appendPage(t)
-                                                    }
+                                            for (n in 1..2) {
+                                                val nextPage = lastQueuedPage + 1
+                                                if (nextPage < totalPages) {
+                                                    lastQueuedPage = nextPage
+                                                    val t = extractPageText(file, nextPage)
+                                                    if (t.isNotBlank()) ttsEngine.appendPage(t)
                                                 }
-                                                if (lastQueuedPage + 1 >= totalPages) ttsEngine.finishSession()
                                             }
+                                            if (lastQueuedPage + 1 >= totalPages) ttsEngine.finishSession()
                                         }
                                     },
                                     enabled = pageText.isNotBlank() && serverConnected,

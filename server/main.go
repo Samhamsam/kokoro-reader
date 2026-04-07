@@ -34,6 +34,11 @@ func main() {
 	}
 	defer database.Close()
 
+	// Download TTS models if missing
+	if err := tts.EnsureModels(modelsDir); err != nil {
+		log.Printf("Warning: model download failed: %v", err)
+	}
+
 	// Load TTS models
 	engine := tts.NewEngine(modelsDir)
 

@@ -18,6 +18,8 @@ pub struct Settings {
     pub server_url: String,
 }
 
+fn default_speed() -> f32 { 1.0 }
+
 fn default_server_url() -> String { "http://localhost:8787".to_string() }
 
 impl Default for Settings {
@@ -51,6 +53,8 @@ pub struct BookEntry {
     pub last_page: usize,
     pub last_sentence: usize,
     pub selected_voice_id: String,
+    #[serde(default = "default_speed")]
+    pub speed: f32,
     pub last_accessed: u64,
 }
 
@@ -139,24 +143,25 @@ impl Library {
         }
     }
 
-    pub fn update_progress(&mut self, id: &str, page: usize, sentence: usize, voice_id: &str) {
+    pub fn update_progress(&mut self, id: &str, page: usize, sentence: usize, voice_id: &str, speed: f32) {
         let client = reqwest::blocking::Client::new();
         let ok = client
             .put(format!("{}/api/books/{}/progress", self.server_url, id))
             .json(&serde_json::json!({
                 "last_page": page,
                 "last_sentence": sentence,
-                "selected_voice_id": voice_id
+                "selected_voice_id": voice_id,
+                "speed": speed
             }))
             .send()
             .map(|r| r.status().is_success())
             .unwrap_or(false);
-        // Only update local state if server confirmed
         if ok {
             if let Some(book) = self.books.iter_mut().find(|b| b.id == id) {
                 book.last_page = page;
                 book.last_sentence = sentence;
                 book.selected_voice_id = voice_id.to_string();
+                book.speed = speed;
             }
         }
     }

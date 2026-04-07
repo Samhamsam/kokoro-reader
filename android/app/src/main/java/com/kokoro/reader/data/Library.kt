@@ -91,14 +91,14 @@ class Library(private val serverUrl: String, private val cacheDir: File) {
         }
     }
 
-    fun updateProgress(id: String, page: Int, sentence: Int, voiceId: String) {
+    fun updateProgress(id: String, page: Int, sentence: Int, voiceId: String, speed: Float = 1.0f) {
         val ok = try {
             val conn = URL("$serverUrl/api/books/$id/progress").openConnection() as HttpURLConnection
             conn.requestMethod = "PUT"
             conn.doOutput = true
             conn.setRequestProperty("Content-Type", "application/json")
             conn.connectTimeout = 5000; conn.readTimeout = 5000
-            conn.outputStream.write("""{"last_page":$page,"last_sentence":$sentence,"selected_voice_id":"$voiceId"}""".toByteArray())
+            conn.outputStream.write("""{"last_page":$page,"last_sentence":$sentence,"selected_voice_id":"$voiceId","speed":$speed}""".toByteArray())
             val code = conn.responseCode
             conn.disconnect()
             code in 200..299

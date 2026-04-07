@@ -8,7 +8,8 @@ data class BookEntry(
     val last_page: Int = 0,
     val last_sentence: Int = 0,
     val selected_voice: Int = 0, // legacy, kept for Desktop compat
-    val selected_voice_id: String = "", // voice name string for cross-platform sync
+    val selected_voice_id: String = "",
+    val speed: Float = 1.0f,
     val last_accessed: Long = 0
 ) {
     val progress: Float

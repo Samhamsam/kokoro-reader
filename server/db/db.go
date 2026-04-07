@@ -15,15 +15,17 @@ type Book struct {
 	TotalPages      int    `json:"total_pages"`
 	LastPage        int    `json:"last_page"`
 	LastSentence    int    `json:"last_sentence"`
-	SelectedVoiceID string `json:"selected_voice_id"`
-	LastAccessed    int64  `json:"last_accessed"`
-	CreatedAt       int64  `json:"created_at,omitempty"`
+	SelectedVoiceID string  `json:"selected_voice_id"`
+	Speed           float32 `json:"speed"`
+	LastAccessed    int64   `json:"last_accessed"`
+	CreatedAt       int64   `json:"created_at,omitempty"`
 }
 
 type ProgressUpdate struct {
-	LastPage        int    `json:"last_page"`
-	LastSentence    int    `json:"last_sentence"`
-	SelectedVoiceID string `json:"selected_voice_id"`
+	LastPage        int     `json:"last_page"`
+	LastSentence    int     `json:"last_sentence"`
+	SelectedVoiceID string  `json:"selected_voice_id"`
+	Speed           float32 `json:"speed"`
 }
 
 type DB struct {
@@ -54,16 +56,20 @@ func (d *DB) migrate() error {
 			last_page INTEGER DEFAULT 0,
 			last_sentence INTEGER DEFAULT 0,
 			selected_voice_id TEXT DEFAULT '',
+			speed REAL DEFAULT 1.0,
 			last_accessed INTEGER DEFAULT 0,
 			created_at INTEGER NOT NULL
 		)
 	`)
+	if err != nil { return err }
+	// Migration: add speed column if missing
+	d.db.Exec(`ALTER TABLE books ADD COLUMN speed REAL DEFAULT 1.0`)
 	return err
 }
 
 func (d *DB) ListBooks() ([]Book, error) {
 	rows, err := d.db.Query(`
-		SELECT id, title, total_pages, last_page, last_sentence, selected_voice_id, last_accessed
+		SELECT id, title, total_pages, last_page, last_sentence, selected_voice_id, speed, last_accessed
 		FROM books ORDER BY last_accessed DESC
 	`)
 	if err != nil {
@@ -74,7 +80,7 @@ func (d *DB) ListBooks() ([]Book, error) {
 	var books []Book
 	for rows.Next() {
 		var b Book
-		if err := rows.Scan(&b.ID, &b.Title, &b.TotalPages, &b.LastPage, &b.LastSentence, &b.SelectedVoiceID, &b.LastAccessed); err != nil {
+		if err := rows.Scan(&b.ID, &b.Title, &b.TotalPages, &b.LastPage, &b.LastSentence, &b.SelectedVoiceID, &b.Speed, &b.LastAccessed); err != nil {
 			return nil, err
 		}
 		books = append(books, b)
@@ -88,9 +94,9 @@ func (d *DB) ListBooks() ([]Book, error) {
 func (d *DB) GetBook(id string) (*Book, error) {
 	var b Book
 	err := d.db.QueryRow(`
-		SELECT id, title, original_filename, total_pages, last_page, last_sentence, selected_voice_id, last_accessed
+		SELECT id, title, original_filename, total_pages, last_page, last_sentence, selected_voice_id, speed, last_accessed
 		FROM books WHERE id = ?
-	`, id).Scan(&b.ID, &b.Title, &b.OriginalFilename, &b.TotalPages, &b.LastPage, &b.LastSentence, &b.SelectedVoiceID, &b.LastAccessed)
+	`, id).Scan(&b.ID, &b.Title, &b.OriginalFilename, &b.TotalPages, &b.LastPage, &b.LastSentence, &b.SelectedVoiceID, &b.Speed, &b.LastAccessed)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -126,10 +132,12 @@ func (d *DB) UpdateProgress(id string, p ProgressUpdate) error {
 		return fmt.Errorf("invalid last_sentence: %d", p.LastSentence)
 	}
 
+	speed := p.Speed
+	if speed <= 0 { speed = 1.0 }
 	_, err = d.db.Exec(`
-		UPDATE books SET last_page = ?, last_sentence = ?, selected_voice_id = ?, last_accessed = ?
+		UPDATE books SET last_page = ?, last_sentence = ?, selected_voice_id = ?, speed = ?, last_accessed = ?
 		WHERE id = ?
-	`, p.LastPage, p.LastSentence, p.SelectedVoiceID, time.Now().Unix(), id)
+	`, p.LastPage, p.LastSentence, p.SelectedVoiceID, speed, time.Now().Unix(), id)
 	return err
 }
 

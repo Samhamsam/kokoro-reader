@@ -147,6 +147,7 @@ impl App {
             let path = self.library.get_pdf_path(&book.id).unwrap_or_default();
             let start_page = book.last_page;
             self.selected_voice = book.selected_voice_id.clone();
+            self.speed = if book.speed > 0.0 { book.speed } else { 1.0 };
             self.resume_sentence = book.last_sentence;
             self.mode = AppMode::Reader {
                 book_id: book_id.to_string(),
@@ -162,7 +163,7 @@ impl App {
         if let AppMode::Reader { ref book_id } = self.mode {
             let sentence = self.tts.current_sentences().1;
                 self.library
-                    .update_progress(book_id, self.current_page, sentence, &self.selected_voice);
+                    .update_progress(book_id, self.current_page, sentence, &self.selected_voice, self.speed);
         }
         self.pdf = None;
         self.page_texture = None;
@@ -255,7 +256,7 @@ impl App {
             }
             // Save progress
             if let AppMode::Reader { ref book_id } = self.mode {
-                self.library.update_progress(book_id, page, 0, &self.selected_voice);
+                self.library.update_progress(book_id, page, 0, &self.selected_voice, self.speed);
             }
         }
     }
@@ -535,7 +536,7 @@ impl App {
                 }
                 // Save progress
                 if let AppMode::Reader { ref book_id } = self.mode {
-                    self.library.update_progress(book_id, self.current_page, 0, &self.selected_voice);
+                    self.library.update_progress(book_id, self.current_page, 0, &self.selected_voice, self.speed);
                 }
                 // Queue one more page ahead (maintains rolling buffer)
                 self.queue_ahead(1);

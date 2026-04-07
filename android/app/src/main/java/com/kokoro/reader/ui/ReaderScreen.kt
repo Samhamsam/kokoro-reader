@@ -41,7 +41,7 @@ fun ReaderScreen(
     var bitmap by remember { mutableStateOf<Bitmap?>(null) }
     var pageText by remember { mutableStateOf("") }
     var loading by remember { mutableStateOf(true) }
-    var speed by remember { mutableFloatStateOf(1.0f) }
+    var speed by remember { mutableFloatStateOf(if (book.speed > 0f) book.speed else 1.0f) }
     var voiceMenuExpanded by remember { mutableStateOf(false) }
 
     // TTS via server

@@ -34,6 +34,7 @@ fun ReaderScreen(
     onBack: () -> Unit
 ) {
     val book = library.books.find { it.id == bookId } ?: run { onBack(); return }
+    val context = androidx.compose.ui.platform.LocalContext.current
     var pdfFile by remember { mutableStateOf<File?>(null) }
 
     var currentPage by remember { mutableIntStateOf(book.last_page) }
@@ -131,7 +132,7 @@ fun ReaderScreen(
 
             // Session fully finished (all pages done)
             if (newState == TtsState.FINISHED || newState == TtsState.ERROR) {
-                readingActive = false
+                readingActive = false; com.kokoro.reader.tts.TtsService.stop(context)
             }
 
             kotlinx.coroutines.delay(200)
@@ -165,6 +166,7 @@ fun ReaderScreen(
     DisposableEffect(Unit) {
         onDispose {
             ttsEngine.stop()
+            com.kokoro.reader.tts.TtsService.stop(context)
             Thread { library.updateProgress(bookId, currentPage, ttsEngine.currentSentence, selectedVoice) }.start()
         }
     }
@@ -183,14 +185,14 @@ fun ReaderScreen(
                         Spacer(Modifier.width(8.dp))
 
                         IconButton(
-                            onClick = { ttsEngine.stop(); readingActive = false; if (currentPage > 0) currentPage-- },
+                            onClick = { ttsEngine.stop(); readingActive = false; com.kokoro.reader.tts.TtsService.stop(context); if (currentPage > 0) currentPage-- },
                             enabled = currentPage > 0
                         ) { Text("<", color = TextPrimary, fontSize = 18.sp) }
 
                         Text("${currentPage + 1}/$totalPages", color = TextDim, fontSize = 14.sp)
 
                         IconButton(
-                            onClick = { ttsEngine.stop(); readingActive = false; if (currentPage + 1 < totalPages) currentPage++ },
+                            onClick = { ttsEngine.stop(); readingActive = false; com.kokoro.reader.tts.TtsService.stop(context); if (currentPage + 1 < totalPages) currentPage++ },
                             enabled = currentPage + 1 < totalPages
                         ) { Text(">", color = TextPrimary, fontSize = 18.sp) }
                     }
@@ -220,6 +222,7 @@ fun ReaderScreen(
                                         val curPage = currentPage
                                         android.util.Log.i("KokoroReader", "PLAY clicked: page=$curPage voice=$voiceToUse textLen=${textToSpeak.length} connected=$serverConnected")
                                         readingActive = true
+                                        com.kokoro.reader.tts.TtsService.start(context)
                                         lastQueuedPage = curPage
                                         coroutineScope.launch(Dispatchers.IO) {
                                             android.util.Log.i("KokoroReader", "IO: calling speak()")
@@ -251,7 +254,7 @@ fun ReaderScreen(
                                     colors = ButtonDefaults.buttonColors(containerColor = Amber)
                                 ) { Text("Pause") }
                                 Button(
-                                    onClick = { ttsEngine.stop(); readingActive = false; ttsState = ttsEngine.state },
+                                    onClick = { ttsEngine.stop(); readingActive = false; com.kokoro.reader.tts.TtsService.stop(context); ttsState = ttsEngine.state },
                                     colors = ButtonDefaults.buttonColors(containerColor = Red)
                                 ) { Text("Stop") }
                             }
@@ -261,7 +264,7 @@ fun ReaderScreen(
                                     colors = ButtonDefaults.buttonColors(containerColor = Green)
                                 ) { Text("Resume") }
                                 Button(
-                                    onClick = { ttsEngine.stop(); readingActive = false; ttsState = ttsEngine.state },
+                                    onClick = { ttsEngine.stop(); readingActive = false; com.kokoro.reader.tts.TtsService.stop(context); ttsState = ttsEngine.state },
                                     colors = ButtonDefaults.buttonColors(containerColor = Red)
                                 ) { Text("Stop") }
                             }
@@ -288,7 +291,8 @@ fun ReaderScreen(
 
                     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
                         Text("Speed: ${String.format("%.1f", speed)}x", color = TextDim, fontSize = 12.sp)
-                        Slider(value = speed, onValueChange = { newSpeed ->
+                        Slider(value = speed, onValueChange = { raw ->
+                            val newSpeed = (Math.round(raw * 10f) / 10f) // round to 0.1
                             if (newSpeed != speed) {
                                 speed = newSpeed
                                 ttsEngine.setSpeed(newSpeed)
@@ -312,7 +316,7 @@ fun ReaderScreen(
                                     }
                                 }
                             }
-                        }, valueRange = 0.5f..2.0f, steps = 5, modifier = Modifier.weight(1f))
+                        }, valueRange = 0.5f..2.0f, steps = 14, modifier = Modifier.weight(1f))
                     }
                 }
             }

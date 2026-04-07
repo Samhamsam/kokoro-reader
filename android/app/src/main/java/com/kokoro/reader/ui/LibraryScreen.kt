@@ -12,6 +12,9 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -31,14 +34,17 @@ fun LibraryScreen(
     var books by remember { mutableStateOf(library.books.toList()) }
     var searchQuery by remember { mutableStateOf("") }
     var deleteConfirm by remember { mutableStateOf<String?>(null) }
+    val coroutineScope = rememberCoroutineScope()
 
     val filePicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri: Uri? ->
-        uri?.let {
-            val filename = getFileName(context, it) ?: "unknown.pdf"
-            library.import(context, it, filename)
-            books = library.books.toList()
+        uri?.let { u ->
+            val filename = getFileName(context, u) ?: "unknown.pdf"
+            coroutineScope.launch {
+                withContext(Dispatchers.IO) { library.import(context, u, filename) }
+                books = library.books.toList()
+            }
         }
     }
 
@@ -122,8 +128,10 @@ fun LibraryScreen(
             text = { Text("Are you sure you want to delete this book?") },
             confirmButton = {
                 TextButton(onClick = {
-                    library.delete(id)
-                    books = library.books.toList()
+                    coroutineScope.launch {
+                        withContext(Dispatchers.IO) { library.delete(id) }
+                        books = library.books.toList()
+                    }
                     deleteConfirm = null
                 }) {
                     Text("Delete", color = Red)

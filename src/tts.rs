@@ -174,8 +174,12 @@ impl TtsEngine {
     fn update_playing_index(&self) {
         let mut pb = self.playback.lock().unwrap();
         if pb.durations.is_empty() || pb.play_start.is_none() { return; }
-        // Subtract paused time from elapsed
-        let elapsed = pb.play_start.unwrap().elapsed() - pb.paused_elapsed;
+        // Subtract paused time from elapsed (including current ongoing pause)
+        let mut total_paused = pb.paused_elapsed;
+        if let Some(pause_start) = pb.pause_start {
+            total_paused += pause_start.elapsed();
+        }
+        let elapsed = pb.play_start.unwrap().elapsed().saturating_sub(total_paused);
         let elapsed = elapsed.as_secs_f32();
         let mut cumulative = 0.0f32;
         for (i, &dur) in pb.durations.iter().enumerate() {

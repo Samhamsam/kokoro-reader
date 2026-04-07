@@ -9,3 +9,4 @@ android/build/
 *.apk
 server/kokoro-server
 server/models/
+server/data/

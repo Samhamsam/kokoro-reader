@@ -10,6 +10,7 @@ import java.io.ByteArrayOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.atomic.AtomicLong
 
 data class ServerVoice(val id: String, val name: String, val lang: String)
 
@@ -22,7 +23,7 @@ class ServerTtsEngine(private var serverUrl: String) {
         private set
 
     private var sentences: List<String> = emptyList()
-    @Volatile private var stopped = false
+    private val generationId = AtomicLong(0) // incremented on each speak()
     @Volatile private var paused = false
     private var speakJob: Job? = null
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
@@ -34,7 +35,7 @@ class ServerTtsEngine(private var serverUrl: String) {
 
     suspend fun fetchVoices(): List<ServerVoice> = withContext(Dispatchers.IO) {
         try {
-            val conn = URL("$serverUrl/voices").openConnection() as HttpURLConnection
+            val conn = URL("$serverUrl/api/voices").openConnection() as HttpURLConnection
             conn.connectTimeout = 3000; conn.readTimeout = 3000
             val json = conn.inputStream.bufferedReader().readText()
             conn.disconnect()
@@ -49,9 +50,11 @@ class ServerTtsEngine(private var serverUrl: String) {
     }
 
     fun speak(text: String, voiceId: String, speed: Float, skipSentences: Int = 0, onStateChange: () -> Unit) {
+        // New generation — invalidates any old running job
+        val myGen = generationId.incrementAndGet()
         speakJob?.cancel()
-        stopped = true // signal old job to stop
-        Thread.sleep(50) // let old job notice
+        paused = false
+        state = TtsState.PLAYING
 
         val splitSentences = TtsEngine.splitIntoSentences(text)
         if (splitSentences.isEmpty()) { state = TtsState.FINISHED; return }
@@ -59,41 +62,34 @@ class ServerTtsEngine(private var serverUrl: String) {
         sentences = splitSentences
         totalSentences = sentences.size
         currentSentence = skipSentences
-        stopped = false
-        paused = false
-        state = TtsState.PLAYING
 
-        // Queue: (sentence_index, samples, sample_rate). null = end.
         data class AudioChunk(val idx: Int, val samples: ShortArray, val sampleRate: Int)
         val pcmQueue = LinkedBlockingQueue<AudioChunk?>(5)
 
+        fun isCurrent() = generationId.get() == myGen
+
         speakJob = scope.launch {
-            // PRODUCER: fetch audio from server, decode WAV, put PCM in queue
             val producer = launch(Dispatchers.IO) {
                 for ((i, sentence) in sentences.withIndex()) {
                     if (i < skipSentences) continue
-                    if (stopped) break
+                    if (!isCurrent()) return@launch
 
                     val wavData = requestTts(sentence, voiceId, speed)
-                    if (wavData == null || stopped) break
+                    if (wavData == null || !isCurrent()) return@launch
 
-                    val parsed = wavToSamples(wavData)
-                    if (parsed != null && !stopped) {
-                        pcmQueue.put(AudioChunk(i, parsed.first, parsed.second))
-                    }
+                    val parsed = wavToSamples(wavData) ?: continue
+                    pcmQueue.put(AudioChunk(i, parsed.first, parsed.second))
                 }
-                pcmQueue.put(null) // end sentinel
+                pcmQueue.put(null)
             }
 
-            // CONSUMER: plays PCM with correct sample rate per chunk
             launch(Dispatchers.IO) {
                 var currentRate = 0
                 var track: AudioTrack? = null
 
                 fun ensureTrack(rate: Int): AudioTrack {
                     if (rate != currentRate || track == null) {
-                        track?.stop()
-                        track?.release()
+                        track?.stop(); track?.release()
                         currentRate = rate
                         val bufSize = AudioTrack.getMinBufferSize(
                             rate, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT
@@ -107,52 +103,43 @@ class ServerTtsEngine(private var serverUrl: String) {
                                 .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
                                 .setChannelMask(AudioFormat.CHANNEL_OUT_MONO).build())
                             .setBufferSizeInBytes(bufSize)
-                            .setTransferMode(AudioTrack.MODE_STREAM)
-                            .build()
+                            .setTransferMode(AudioTrack.MODE_STREAM).build()
                         t.play()
-                        track = t
-                        return t
+                        track = t; return t
                     }
                     return track!!
                 }
 
-                while (!stopped) {
+                while (isCurrent()) {
                     val chunk = pcmQueue.poll(100, java.util.concurrent.TimeUnit.MILLISECONDS)
-                    if (chunk == null && pcmQueue.isEmpty()) {
-                        if (!producer.isActive) break
+                    if (chunk == null) {
+                        if (pcmQueue.isEmpty() && !producer.isActive) break
                         continue
                     }
-                    if (chunk == null) break
 
                     currentSentence = chunk.idx
                     val t = ensureTrack(chunk.sampleRate)
-
                     var written = 0
-                    while (written < chunk.samples.size && !stopped) {
-                        while (paused && !stopped) { Thread.sleep(50) }
-                        if (stopped) break
-                        val result = t.write(chunk.samples, written,
-                            minOf(4096, chunk.samples.size - written))
+                    while (written < chunk.samples.size && isCurrent()) {
+                        while (paused && isCurrent()) { Thread.sleep(50) }
+                        if (!isCurrent()) break
+                        val result = t.write(chunk.samples, written, minOf(4096, chunk.samples.size - written))
                         if (result > 0) written += result
                     }
                 }
 
-                track?.stop()
-                track?.release()
+                track?.stop(); track?.release()
             }
 
             producer.join()
-
-            if (!stopped) {
-                // Wait for consumer to finish playing
+            if (isCurrent()) {
                 while (!pcmQueue.isEmpty()) { delay(100) }
-                delay(200) // let last audio drain
+                delay(200)
                 state = TtsState.FINISHED
             }
         }
     }
 
-    /** Returns (samples, sampleRate) parsed from WAV header */
     private fun wavToSamples(wavData: ByteArray): Pair<ShortArray, Int>? {
         if (wavData.size < 44) return null
         val sampleRate = (wavData[24].toInt() and 0xFF) or
@@ -169,7 +156,7 @@ class ServerTtsEngine(private var serverUrl: String) {
 
     private fun requestTts(text: String, voice: String, speed: Float): ByteArray? {
         return try {
-            val conn = URL("$serverUrl/tts").openConnection() as HttpURLConnection
+            val conn = URL("$serverUrl/api/tts").openConnection() as HttpURLConnection
             conn.requestMethod = "POST"
             conn.setRequestProperty("Content-Type", "application/json")
             conn.connectTimeout = 10000; conn.readTimeout = 30000; conn.doOutput = true
@@ -186,7 +173,7 @@ class ServerTtsEngine(private var serverUrl: String) {
 
     fun pause() { paused = true; state = TtsState.PAUSED }
     fun resume(onStateChange: () -> Unit) { paused = false; state = TtsState.PLAYING }
-    fun stop() { stopped = true; paused = false; speakJob?.cancel(); state = TtsState.IDLE }
+    fun stop() { generationId.incrementAndGet(); paused = false; speakJob?.cancel(); state = TtsState.IDLE }
     fun getCurrentSentenceText(): String? = sentences.getOrNull(currentSentence)
     fun release() { stop(); scope.cancel() }
 }

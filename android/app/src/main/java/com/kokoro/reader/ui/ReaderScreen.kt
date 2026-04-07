@@ -104,7 +104,7 @@ fun ReaderScreen(
                     bitmap = result?.first
                     pageText = result?.second ?: ""
                     loading = false
-                    library.updateProgress(bookId, currentPage, 0, selectedVoice)
+                    withContext(Dispatchers.IO) { library.updateProgress(bookId, currentPage, 0, selectedVoice) }
                     if (pageText.isNotBlank()) {
                         waitingForStart = true // reset for next page
                         ttsEngine.speak(pageText, selectedVoice, speed, onStateChange = noopCallback)
@@ -137,7 +137,7 @@ fun ReaderScreen(
                 totalPages = withContext(Dispatchers.IO) { getPageCount(file) }
             }
             withContext(Dispatchers.IO) {
-                library.updateProgress(bookId, currentPage, 0, selectedVoice)
+                withContext(Dispatchers.IO) { library.updateProgress(bookId, currentPage, 0, selectedVoice) }
             }
         }
     }
@@ -145,7 +145,7 @@ fun ReaderScreen(
     DisposableEffect(Unit) {
         onDispose {
             ttsEngine.stop()
-            library.updateProgress(bookId, currentPage, ttsEngine.currentSentence, selectedVoice)
+            Thread { library.updateProgress(bookId, currentPage, ttsEngine.currentSentence, selectedVoice) }.start()
         }
     }
 
@@ -156,7 +156,7 @@ fun ReaderScreen(
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         TextButton(onClick = {
                             ttsEngine.stop()
-                            library.updateProgress(bookId, currentPage, ttsEngine.currentSentence, selectedVoice)
+                            Thread { library.updateProgress(bookId, currentPage, ttsEngine.currentSentence, selectedVoice) }.start()
                             onBack()
                         }) { Text("< Library", color = TextPrimary) }
 

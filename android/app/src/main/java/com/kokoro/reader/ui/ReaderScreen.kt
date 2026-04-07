@@ -58,6 +58,7 @@ fun ReaderScreen(
     var lastQueuedPage by remember { mutableIntStateOf(currentPage) }
 
     val noopCallback: () -> Unit = {} // TTS engine callback does nothing — we poll instead
+    val canManuallyChangePage = !readingActive
 
     // Resume: use saved sentence only on first Play after opening
     var resumeSentence by remember { mutableIntStateOf(book.last_sentence) }
@@ -318,15 +319,29 @@ fun ReaderScreen(
                         Spacer(Modifier.width(8.dp))
 
                         IconButton(
-                            onClick = { ttsEngine.stop(); readingActive = false; com.kokoro.reader.tts.TtsService.stop(context); resumeSentence = 0; if (currentPage > 0) currentPage-- },
-                            enabled = currentPage > 0
+                            onClick = {
+                                if (!canManuallyChangePage) return@IconButton
+                                ttsEngine.stop()
+                                readingActive = false
+                                com.kokoro.reader.tts.TtsService.stop(context)
+                                resumeSentence = 0
+                                if (currentPage > 0) currentPage--
+                            },
+                            enabled = currentPage > 0 && canManuallyChangePage
                         ) { Text("<", color = TextPrimary, fontSize = 18.sp) }
 
                         Text("${currentPage + 1}/$totalPages", color = TextDim, fontSize = 14.sp)
 
                         IconButton(
-                            onClick = { ttsEngine.stop(); readingActive = false; com.kokoro.reader.tts.TtsService.stop(context); resumeSentence = 0; if (currentPage + 1 < totalPages) currentPage++ },
-                            enabled = currentPage + 1 < totalPages
+                            onClick = {
+                                if (!canManuallyChangePage) return@IconButton
+                                ttsEngine.stop()
+                                readingActive = false
+                                com.kokoro.reader.tts.TtsService.stop(context)
+                                resumeSentence = 0
+                                if (currentPage + 1 < totalPages) currentPage++
+                            },
+                            enabled = currentPage + 1 < totalPages && canManuallyChangePage
                         ) { Text(">", color = TextPrimary, fontSize = 18.sp) }
                     }
                 },

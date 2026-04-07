@@ -1,0 +1,53 @@
+name: Android
+
+on:
+  push:
+    branches: [main]
+    paths: [android/**]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Build release APK
+        working-directory: android
+        run: ./gradlew assembleRelease
+
+      - name: Sign APK
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > /tmp/keystore.jks
+            zipalign -f 4 android/app/build/outputs/apk/release/app-release-unsigned.apk /tmp/aligned.apk
+            apksigner sign \
+              --ks /tmp/keystore.jks \
+              --ks-pass "pass:$KEYSTORE_PASSWORD" \
+              --ks-key-alias "$KEY_ALIAS" \
+              --key-pass "pass:$KEY_PASSWORD" \
+              --out /tmp/kokoro-reader.apk \
+              /tmp/aligned.apk
+            cp /tmp/kokoro-reader.apk kokoro-reader.apk
+          else
+            echo "No signing key configured, uploading unsigned APK"
+            cp android/app/build/outputs/apk/release/app-release-unsigned.apk kokoro-reader.apk
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kokoro-reader-android
+          path: kokoro-reader.apk

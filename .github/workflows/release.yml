@@ -1,0 +1,129 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libssl-dev pkg-config
+
+      - name: Download pdfium
+        run: |
+          mkdir -p lib/lib
+          curl -L -o /tmp/pdfium.tgz https://github.com/nicehash/pdfium-binaries/releases/download/v129.0.6668.0/pdfium-linux-x64.tgz
+          tar -xzf /tmp/pdfium.tgz -C /tmp/pdfium-extract || true
+          find /tmp -name "libpdfium.so" -exec cp {} lib/lib/libpdfium.so \;
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release
+        run: cargo build --release
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp target/release/kokoro-reader dist/
+          cp lib/lib/libpdfium.so dist/
+          cp assets/icon.png dist/kokoro-reader.png
+          cp kokoro-reader.desktop dist/
+          cp Makefile dist/
+          tar -czf kokoro-reader-linux-x64.tar.gz -C dist .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rust-release
+          path: kokoro-reader-linux-x64.tar.gz
+
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Build release APK
+        working-directory: android
+        run: ./gradlew assembleRelease
+
+      - name: Sign APK
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > /tmp/keystore.jks
+            zipalign -f 4 android/app/build/outputs/apk/release/app-release-unsigned.apk /tmp/aligned.apk
+            apksigner sign \
+              --ks /tmp/keystore.jks \
+              --ks-pass "pass:$KEYSTORE_PASSWORD" \
+              --ks-key-alias "$KEY_ALIAS" \
+              --key-pass "pass:$KEY_PASSWORD" \
+              --out kokoro-reader.apk \
+              /tmp/aligned.apk
+          else
+            cp android/app/build/outputs/apk/release/app-release-unsigned.apk kokoro-reader.apk
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-release
+          path: kokoro-reader.apk
+
+  docker:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v5
+        with:
+          context: ./server
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}/kokoro-server:${{ github.ref_name }}
+            ghcr.io/${{ github.repository }}/kokoro-server:latest
+
+  publish:
+    needs: [rust, android, docker]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: rust-release
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: android-release
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            kokoro-reader-linux-x64.tar.gz
+            kokoro-reader.apk
+          generate_release_notes: true

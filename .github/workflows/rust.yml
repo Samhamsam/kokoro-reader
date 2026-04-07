@@ -1,0 +1,47 @@
+name: Rust Desktop
+
+on:
+  push:
+    branches: [main]
+    paths: [src/**, Cargo.toml, Cargo.lock]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libssl-dev pkg-config
+
+      - name: Download pdfium
+        run: |
+          mkdir -p lib/lib
+          curl -L -o /tmp/pdfium.tgz https://github.com/nicehash/pdfium-binaries/releases/download/v129.0.6668.0/pdfium-linux-x64.tgz
+          tar -xzf /tmp/pdfium.tgz -C /tmp/pdfium-extract || true
+          find /tmp -name "libpdfium.so" -exec cp {} lib/lib/libpdfium.so \;
+          ls -la lib/lib/
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release
+        run: cargo build --release
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp target/release/kokoro-reader dist/
+          cp assets/icon.png dist/kokoro-reader.png
+          cp kokoro-reader.desktop dist/
+          tar -czf kokoro-reader-linux-x64.tar.gz -C dist .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kokoro-reader-linux-x64
+          path: kokoro-reader-linux-x64.tar.gz

@@ -164,9 +164,10 @@ fun ReaderScreen(
 
     DisposableEffect(Unit) {
         onDispose {
+            val sentenceIdx = ttsEngine.localSentenceIndex() // capture BEFORE stop
             ttsEngine.stop()
             com.kokoro.reader.tts.TtsService.stop(context)
-            Thread { library.updateProgress(bookId, currentPage, ttsEngine.localSentenceIndex(), selectedVoice, speed) }.start()
+            Thread { library.updateProgress(bookId, currentPage, sentenceIdx, selectedVoice, speed) }.start()
         }
     }
 
@@ -176,22 +177,23 @@ fun ReaderScreen(
                 title = {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         TextButton(onClick = {
+                            val sentenceIdx = ttsEngine.localSentenceIndex() // capture BEFORE stop
                             ttsEngine.stop()
-                            Thread { library.updateProgress(bookId, currentPage, ttsEngine.localSentenceIndex(), selectedVoice, speed) }.start()
+                            Thread { library.updateProgress(bookId, currentPage, sentenceIdx, selectedVoice, speed) }.start()
                             onBack()
                         }) { Text("< Library", color = TextPrimary) }
 
                         Spacer(Modifier.width(8.dp))
 
                         IconButton(
-                            onClick = { ttsEngine.stop(); readingActive = false; com.kokoro.reader.tts.TtsService.stop(context); if (currentPage > 0) currentPage-- },
+                            onClick = { ttsEngine.stop(); readingActive = false; com.kokoro.reader.tts.TtsService.stop(context); resumeSentence = 0; if (currentPage > 0) currentPage-- },
                             enabled = currentPage > 0
                         ) { Text("<", color = TextPrimary, fontSize = 18.sp) }
 
                         Text("${currentPage + 1}/$totalPages", color = TextDim, fontSize = 14.sp)
 
                         IconButton(
-                            onClick = { ttsEngine.stop(); readingActive = false; com.kokoro.reader.tts.TtsService.stop(context); if (currentPage + 1 < totalPages) currentPage++ },
+                            onClick = { ttsEngine.stop(); readingActive = false; com.kokoro.reader.tts.TtsService.stop(context); resumeSentence = 0; if (currentPage + 1 < totalPages) currentPage++ },
                             enabled = currentPage + 1 < totalPages
                         ) { Text(">", color = TextPrimary, fontSize = 18.sp) }
                     }
@@ -299,10 +301,10 @@ fun ReaderScreen(
                                 ttsEngine.setSpeed(newSpeed)
                                 // Restart from current sentence with new speed
                                 if (readingActive) {
+                                    val localIdx = ttsEngine.localSentenceIndex() // capture BEFORE stop
                                     ttsEngine.stop()
                                     coroutineScope.launch(Dispatchers.IO) {
-                                        // Restart from beginning of current page with new speed
-                                        ttsEngine.speak(pageText, selectedVoice, newSpeed)
+                                        ttsEngine.speak(pageText, selectedVoice, newSpeed, skipSentences = localIdx)
                                         // Re-queue ahead
                                         val file = pdfFile ?: return@launch
                                         lastQueuedPage = currentPage

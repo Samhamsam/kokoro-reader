@@ -157,13 +157,13 @@ impl App {
     }
 
     fn back_to_library(&mut self) {
+        // Capture position BEFORE stop (stop invalidates playback state)
+        let sentence = self.tts.local_sentence_index();
         self.tts.stop();
         self.reading_active = false;
-        // Save current progress
         if let AppMode::Reader { ref book_id } = self.mode {
-            let sentence = self.tts.local_sentence_index();
-                self.library
-                    .update_progress(book_id, self.current_page, sentence, &self.selected_voice, self.speed);
+            self.library
+                .update_progress(book_id, self.current_page, sentence, &self.selected_voice, self.speed);
         }
         self.pdf = None;
         self.page_texture = None;
@@ -247,6 +247,7 @@ impl App {
         let page_count = self.pdf.as_ref().map_or(0, |p| p.page_count());
         if page < page_count {
             self.current_page = page;
+            self.resume_sentence = 0; // invalidate: resume only valid for the saved page
             self.page_texture = None;
             // Render synchronously — fast enough for page switches (<100ms)
             if let Some(ref pdf) = self.pdf {
@@ -732,11 +733,12 @@ impl App {
                                     .trailing_fill(true),
                             );
                             if (self.speed - old_speed).abs() > 0.01 && self.reading_active {
-                                // Restart from beginning of current page with new speed
+                                // Capture local position BEFORE stop
+                                let local_idx = self.tts.local_sentence_index();
                                 let voice = self.selected_voice.clone();
                                 self.tts.stop();
                                 self.last_queued_page = self.current_page;
-                                self.tts.speak(self.page_text.clone(), voice, self.speed, 0);
+                                self.tts.speak(self.page_text.clone(), voice, self.speed, local_idx);
                                 self.queue_ahead(2);
                             }
                         },

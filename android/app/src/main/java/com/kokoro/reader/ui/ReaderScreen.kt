@@ -52,10 +52,7 @@ fun ReaderScreen(
     var readingActive by remember { mutableStateOf(false) }
     var serverConnected by remember { mutableStateOf(false) }
 
-    val onStateChange: () -> Unit = {
-        ttsState = ttsEngine.state
-        currentSentenceIdx = ttsEngine.currentSentence
-    }
+    val noopCallback: () -> Unit = {} // TTS engine callback does nothing — we poll instead
 
     // Fetch voices from server on start
     LaunchedEffect(serverUrl) {
@@ -63,35 +60,77 @@ fun ReaderScreen(
         val fetched = ttsEngine.fetchVoices()
         voices = fetched
         serverConnected = fetched.isNotEmpty()
+        // Validate saved voice ID — if not found on server, use first available
+        if (fetched.isNotEmpty() && fetched.none { it.id == selectedVoice }) {
+            selectedVoice = fetched.first().id
+        }
     }
 
-    // Auto-advance
-    LaunchedEffect(ttsState) {
-        if (ttsState == TtsState.FINISHED && readingActive) {
-            if (currentPage + 1 < totalPages) {
-                currentPage++
-            } else {
-                readingActive = false
+    // Poll TTS state every 200ms — simple and no recomposition loops
+    LaunchedEffect(readingActive) {
+        if (!readingActive) return@LaunchedEffect
+
+        // Wait for TTS to actually start before polling
+        // (avoid treating initial IDLE/FINISHED as "done")
+        var waitingForStart = true
+
+        while (readingActive) {
+            val newState = ttsEngine.state
+            val newSentence = ttsEngine.currentSentence
+
+            // Once we see PLAYING or GENERATING, we know TTS has started
+            if (waitingForStart) {
+                if (newState == TtsState.PLAYING || newState == TtsState.GENERATING) {
+                    waitingForStart = false
+                }
+                // Don't process FINISHED while waiting for start
+                ttsState = newState
+                currentSentenceIdx = newSentence
+                kotlinx.coroutines.delay(100)
+                continue
             }
+
+            if (newState != ttsState) ttsState = newState
+            if (newSentence != currentSentenceIdx) currentSentenceIdx = newSentence
+
+            // Auto-advance when finished
+            if (newState == TtsState.FINISHED) {
+                if (currentPage + 1 < totalPages) {
+                    currentPage++
+                    kotlinx.coroutines.delay(300)
+                    loading = true
+                    val result = withContext(Dispatchers.IO) { renderPage(pdfFile, currentPage) }
+                    bitmap = result?.first
+                    pageText = result?.second ?: ""
+                    loading = false
+                    library.updateProgress(bookId, currentPage, 0, selectedVoice)
+                    if (pageText.isNotBlank()) {
+                        waitingForStart = true // reset for next page
+                        ttsEngine.speak(pageText, selectedVoice, speed, onStateChange = noopCallback)
+                    }
+                } else {
+                    readingActive = false
+                }
+            }
+
+            kotlinx.coroutines.delay(200)
         }
+        ttsState = ttsEngine.state
     }
 
-    // Render page
+    // Render first page
     LaunchedEffect(currentPage) {
-        loading = true
-        val result = withContext(Dispatchers.IO) { renderPage(pdfFile, currentPage) }
-        bitmap = result?.first
-        pageText = result?.second ?: ""
-        loading = false
+        if (!readingActive) { // Only render if not auto-advancing (that's handled above)
+            loading = true
+            val result = withContext(Dispatchers.IO) { renderPage(pdfFile, currentPage) }
+            bitmap = result?.first
+            pageText = result?.second ?: ""
+            loading = false
 
-        if (totalPages == 0) {
-            totalPages = withContext(Dispatchers.IO) { getPageCount(pdfFile) }
-        }
-
-        library.updateProgress(bookId, currentPage, 0, selectedVoice)
-
-        if (readingActive && pageText.isNotBlank()) {
-            ttsEngine.speak(pageText, selectedVoice, speed, onStateChange = onStateChange)
+            if (totalPages == 0) {
+                totalPages = withContext(Dispatchers.IO) { getPageCount(pdfFile) }
+            }
+            library.updateProgress(bookId, currentPage, 0, selectedVoice)
         }
     }
 
@@ -148,8 +187,8 @@ fun ReaderScreen(
                             TtsState.IDLE, TtsState.FINISHED, TtsState.ERROR -> {
                                 Button(
                                     onClick = {
-                                        readingActive = true
-                                        ttsEngine.speak(pageText, selectedVoice, speed, onStateChange = onStateChange)
+                                        ttsEngine.speak(pageText, selectedVoice, speed, onStateChange = noopCallback)
+                                        readingActive = true // set AFTER speak so polling doesn't see FINISHED
                                     },
                                     enabled = pageText.isNotBlank() && serverConnected,
                                     colors = ButtonDefaults.buttonColors(containerColor = Green)
@@ -161,21 +200,21 @@ fun ReaderScreen(
                             }
                             TtsState.PLAYING -> {
                                 Button(
-                                    onClick = { ttsEngine.pause(); onStateChange() },
+                                    onClick = { ttsEngine.pause(); ttsState = ttsEngine.state },
                                     colors = ButtonDefaults.buttonColors(containerColor = Amber)
                                 ) { Text("Pause") }
                                 Button(
-                                    onClick = { ttsEngine.stop(); readingActive = false; onStateChange() },
+                                    onClick = { ttsEngine.stop(); readingActive = false; ttsState = ttsEngine.state },
                                     colors = ButtonDefaults.buttonColors(containerColor = Red)
                                 ) { Text("Stop") }
                             }
                             TtsState.PAUSED -> {
                                 Button(
-                                    onClick = { ttsEngine.resume(onStateChange) },
+                                    onClick = { ttsEngine.resume(noopCallback) },
                                     colors = ButtonDefaults.buttonColors(containerColor = Green)
                                 ) { Text("Resume") }
                                 Button(
-                                    onClick = { ttsEngine.stop(); readingActive = false; onStateChange() },
+                                    onClick = { ttsEngine.stop(); readingActive = false; ttsState = ttsEngine.state },
                                     colors = ButtonDefaults.buttonColors(containerColor = Red)
                                 ) { Text("Stop") }
                             }

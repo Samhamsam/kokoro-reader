@@ -12,7 +12,8 @@
         android:label="Kokoro Reader"
         android:supportsRtl="true"
         android:theme="@style/Theme.KokoroReader"
-        android:requestLegacyExternalStorage="true">
+        android:requestLegacyExternalStorage="true"
+        android:usesCleartextTraffic="true">
 
         <activity
             android:name=".MainActivity"

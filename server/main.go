@@ -32,6 +32,7 @@ type TTSRequest struct {
 }
 
 type VoiceInfo struct {
+	ID   string `json:"id"`
 	Name string `json:"name"`
 	Lang string `json:"lang"`
 }
@@ -129,6 +130,8 @@ func handleTTS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	log.Printf("TTS request: voice=%s text=%.50s...\n", req.Voice, req.Text)
+
 	if req.Text == "" {
 		http.Error(w, "text is required", http.StatusBadRequest)
 		return
@@ -145,7 +148,8 @@ func handleTTS(w http.ResponseWriter, r *http.Request) {
 	voicesMu.Unlock()
 
 	if !ok {
-		http.Error(w, fmt.Sprintf("voice '%s' not found", req.Voice), http.StatusBadRequest)
+		log.Printf("Voice '%s' not found\n", req.Voice)
+		http.Error(w, fmt.Sprintf("voice '%s' not found. Available: see GET /voices", req.Voice), http.StatusBadRequest)
 		return
 	}
 
@@ -175,7 +179,7 @@ func handleVoices(w http.ResponseWriter, r *http.Request) {
 		if id == "piper_thorsten" {
 			lang = "de"
 		}
-		list = append(list, VoiceInfo{Name: v.Name, Lang: lang})
+		list = append(list, VoiceInfo{ID: id, Name: v.Name, Lang: lang})
 	}
 
 	w.Header().Set("Content-Type", "application/json")

@@ -276,7 +276,8 @@ impl TtsEngine {
                 None => { if is_current() { *state.lock().unwrap() = TtsState::Error("No audio".into()); } return; }
             };
             let sink = rodio::Sink::connect_new(stream_ref.mixer());
-            sink.set_speed(speed);
+            // Don't set sink.set_speed() — speed is handled server-side
+            // to preserve correct pitch. Rodio speed changes pitch.
             *sink_holder.lock().unwrap() = Some(sink);
 
             let mut first_played = false;
@@ -311,7 +312,7 @@ impl TtsEngine {
                     Some((samples, sample_rate)) => {
                         consecutive_failures = 0;
                         success_count += 1;
-                        let duration = samples.len() as f32 / sample_rate as f32 / speed;
+                        let duration = samples.len() as f32 / sample_rate as f32;
                         {
                             let mut pb = playback.lock().unwrap();
                             pb.durations.push(duration);
@@ -427,8 +428,9 @@ impl TtsEngine {
         *self.state.lock().unwrap() = TtsState::Idle;
     }
 
-    pub fn set_speed(&self, speed: f32) {
-        if let Some(sink) = self.sink.lock().unwrap().as_ref() { sink.set_speed(speed); }
+    pub fn set_speed(&self, _speed: f32) {
+        // Speed is handled server-side (Kokoro/Piper generate at correct speed).
+        // Do NOT use sink.set_speed() — it changes pitch.
     }
 
     pub fn clear_finished(&self) {

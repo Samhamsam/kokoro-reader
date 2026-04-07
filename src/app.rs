@@ -29,6 +29,7 @@ enum RenderResult {
 enum AppMode {
     Library,
     Reader { book_id: String },
+    Settings,
 }
 
 pub struct App {
@@ -54,6 +55,8 @@ pub struct App {
     loading: bool,
     needs_render_data: Option<PageRender>,
     resume_sentence: usize,
+    settings: crate::library::Settings,
+    settings_path_input: String,
 }
 
 impl App {
@@ -83,7 +86,8 @@ impl App {
         cc.egui_ctx.set_style(style);
 
         let (render_tx, render_rx) = mpsc::channel();
-        let mut library = Library::load();
+        let settings = crate::library::load_settings();
+        let library = Library::load(&settings.data_dir);
 
         let mut app = Self {
             mode: AppMode::Library,
@@ -107,6 +111,8 @@ impl App {
             loading: false,
             needs_render_data: None,
             resume_sentence: 0,
+            settings: settings.clone(),
+            settings_path_input: settings.data_dir.to_string_lossy().to_string(),
         };
 
         // If launched with a PDF argument, import and open it
@@ -134,7 +140,7 @@ impl App {
 
     fn open_book(&mut self, book_id: &str) {
         if let Some(book) = self.library.get(book_id) {
-            let path = book.book_path();
+            let path = book.book_path(&self.library.data_dir);
             let start_page = book.last_page;
             self.selected_voice = book.selected_voice;
             self.resume_sentence = book.last_sentence;
@@ -293,6 +299,10 @@ impl App {
                         );
 
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button(RichText::new("Settings").color(TEXT_DIM)).clicked() {
+                                self.mode = AppMode::Settings;
+                            }
+                            ui.add_space(8.0);
                             if styled_button(ui, "Import Book", ACCENT).clicked() {
                                 self.import_book();
                             }
@@ -859,6 +869,67 @@ impl eframe::App for App {
         match self.mode {
             AppMode::Library => self.show_library(ctx),
             AppMode::Reader { .. } => self.show_reader(ctx),
+            AppMode::Settings => self.show_settings(ctx),
         }
+    }
+}
+
+impl App {
+    fn show_settings(&mut self, ctx: &egui::Context) {
+        egui::TopBottomPanel::top("settings_toolbar")
+            .exact_height(52.0)
+            .frame(egui::Frame::new().fill(SURFACE).inner_margin(egui::Margin::symmetric(20, 0)))
+            .show(ctx, |ui| {
+                let rect = ui.available_rect_before_wrap();
+                ui.allocate_ui_at_rect(rect, |ui| {
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        if ui.button(RichText::new("< Back").color(TEXT_PRIMARY)).clicked() {
+                            self.mode = AppMode::Library;
+                        }
+                        ui.add_space(16.0);
+                        ui.label(
+                            RichText::new("Settings")
+                                .font(FontId::proportional(20.0))
+                                .color(TEXT_PRIMARY)
+                                .strong(),
+                        );
+                    });
+                });
+            });
+
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(BG_DARK).inner_margin(egui::Margin::symmetric(20, 16)))
+            .show(ctx, |ui| {
+                ui.add_space(16.0);
+                ui.label(RichText::new("Data Folder").color(TEXT_PRIMARY).strong());
+                ui.add_space(4.0);
+                ui.label(RichText::new("Books and progress are stored here. Point this to your Syncthing folder for sync.").color(TEXT_DIM).small());
+                ui.add_space(8.0);
+
+                ui.horizontal(|ui| {
+                    let input = egui::TextEdit::singleline(&mut self.settings_path_input)
+                        .desired_width(ui.available_width() - 100.0)
+                        .font(FontId::proportional(14.0));
+                    ui.add(input);
+
+                    if ui.button("Browse").clicked() {
+                        if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                            self.settings_path_input = folder.to_string_lossy().to_string();
+                        }
+                    }
+                });
+
+                ui.add_space(16.0);
+
+                let changed = self.settings_path_input != self.settings.data_dir.to_string_lossy();
+                if changed {
+                    if styled_button(ui, "Save & Apply", ACCENT).clicked() {
+                        self.settings.data_dir = PathBuf::from(&self.settings_path_input);
+                        crate::library::save_settings(&self.settings);
+                        self.library = Library::load(&self.settings.data_dir);
+                        self.mode = AppMode::Library;
+                    }
+                }
+            });
     }
 }

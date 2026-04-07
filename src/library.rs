@@ -11,17 +11,44 @@ fn now() -> u64 {
         .as_secs()
 }
 
-fn data_dir() -> PathBuf {
+pub fn default_data_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     Path::new(&home).join(".local/share/kokoro-reader")
 }
 
-fn books_dir() -> PathBuf {
-    data_dir().join("books")
+fn config_dir() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    Path::new(&home).join(".config/kokoro-reader")
 }
 
-fn library_path() -> PathBuf {
-    data_dir().join("library.json")
+pub fn load_settings() -> Settings {
+    let path = config_dir().join("config.json");
+    if path.exists() {
+        let data = fs::read_to_string(&path).unwrap_or_default();
+        serde_json::from_str(&data).unwrap_or_default()
+    } else {
+        Settings::default()
+    }
+}
+
+pub fn save_settings(settings: &Settings) {
+    fs::create_dir_all(config_dir()).ok();
+    if let Ok(json) = serde_json::to_string_pretty(settings) {
+        fs::write(config_dir().join("config.json"), json).ok();
+    }
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct Settings {
+    pub data_dir: PathBuf,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            data_dir: default_data_dir(),
+        }
+    }
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -49,8 +76,8 @@ impl BookEntry {
         (self.progress() * 100.0).round() as u32
     }
 
-    pub fn book_path(&self) -> PathBuf {
-        books_dir().join(&self.filename)
+    pub fn book_path(&self, data_dir: &Path) -> PathBuf {
+        data_dir.join("books").join(&self.filename)
     }
 }
 
@@ -61,14 +88,18 @@ struct LibraryData {
 
 pub struct Library {
     pub books: Vec<BookEntry>,
+    pub data_dir: PathBuf,
 }
 
 impl Library {
-    pub fn load() -> Self {
-        fs::create_dir_all(books_dir()).ok();
+    pub fn load(data_dir: &Path) -> Self {
+        let data_dir = data_dir.to_path_buf();
+        let books_dir = data_dir.join("books");
+        let library_path = data_dir.join("library.json");
+        fs::create_dir_all(&books_dir).ok();
 
-        let books = if library_path().exists() {
-            let data = fs::read_to_string(library_path()).unwrap_or_default();
+        let books = if library_path.exists() {
+            let data = fs::read_to_string(&library_path).unwrap_or_default();
             serde_json::from_str::<LibraryData>(&data)
                 .map(|d| d.books)
                 .unwrap_or_default()
@@ -76,22 +107,21 @@ impl Library {
             vec![]
         };
 
-        // Filter out books whose files no longer exist
         let books = books
             .into_iter()
-            .filter(|b| b.book_path().exists())
+            .filter(|b| b.book_path(&data_dir).exists())
             .collect();
 
-        Self { books }
+        Self { books, data_dir }
     }
 
     pub fn save(&self) {
-        fs::create_dir_all(data_dir()).ok();
+        fs::create_dir_all(&self.data_dir).ok();
         let data = LibraryData {
             books: self.books.clone(),
         };
         if let Ok(json) = serde_json::to_string_pretty(&data) {
-            fs::write(library_path(), json).ok();
+            fs::write(self.data_dir.join("library.json"), json).ok();
         }
     }
 
@@ -102,14 +132,12 @@ impl Library {
             .to_string_lossy()
             .to_string();
 
-        // Check if already imported
         if self.books.iter().any(|b| b.filename == filename) {
-            // Already exists — just return its id
             return Ok(self.books.iter().find(|b| b.filename == filename).unwrap().id.clone());
         }
 
-        // Copy file to books dir
-        let dest = books_dir().join(&filename);
+        let dest = self.data_dir.join("books").join(&filename);
+        fs::create_dir_all(self.data_dir.join("books")).ok();
         fs::copy(source_path, &dest)
             .map_err(|e| format!("Failed to copy: {}", e))?;
 
@@ -147,7 +175,7 @@ impl Library {
     pub fn delete(&mut self, id: &str) {
         if let Some(pos) = self.books.iter().position(|b| b.id == id) {
             let book = self.books.remove(pos);
-            fs::remove_file(book.book_path()).ok();
+            fs::remove_file(book.book_path(&self.data_dir)).ok();
             self.save();
         }
     }

@@ -18,9 +18,11 @@ import (
 )
 
 type SummaryHandler struct {
-	DB       *db.DB
-	BooksDir string
-	APIKey   string // Groq API key
+	DB        *db.DB
+	BooksDir  string
+	APIKey    string // Groq API key
+	OllamaURL string // e.g. http://localhost:11434
+	OllamaModel string // e.g. gemma4:e2b
 }
 
 type summaryRequest struct {
@@ -32,10 +34,10 @@ type summaryResponse struct {
 	Lang    string `json:"lang"`
 }
 
-// Summarize generates a summary of a book using Groq LLM
+// Summarize generates a summary of a book using Ollama or Groq LLM
 func (h *SummaryHandler) Summarize(w http.ResponseWriter, r *http.Request, id string) {
-	if h.APIKey == "" {
-		http.Error(w, "GROQ_API_KEY not configured", http.StatusServiceUnavailable)
+	if h.OllamaURL == "" && h.APIKey == "" {
+		http.Error(w, "No LLM configured (set OLLAMA_URL or GROQ_API_KEY)", http.StatusServiceUnavailable)
 		return
 	}
 
@@ -99,9 +101,20 @@ func (h *SummaryHandler) Summarize(w http.ResponseWriter, r *http.Request, id st
 	json.NewEncoder(w).Encode(summaryResponse{Summary: summary, Lang: lang})
 }
 
+func (h *SummaryHandler) callLLM(prompt string) (string, error) {
+	if h.OllamaURL != "" {
+		return h.callOllama(prompt)
+	}
+	return h.callGroq(prompt)
+}
+
 func (h *SummaryHandler) generateSummary(title, text, lang string) (string, error) {
-	// Split into chunks of ~6000 chars (~1500 tokens) to stay within Groq free tier limits
-	chunks := splitText(text, 6000)
+	// Ollama has no rate limits, use larger chunks
+	chunkSize := 6000
+	if h.OllamaURL != "" {
+		chunkSize = 20000
+	}
+	chunks := splitText(text, chunkSize)
 
 	langName := langFullName(lang)
 
@@ -113,7 +126,7 @@ func (h *SummaryHandler) generateSummary(title, text, lang string) (string, erro
 				"The summary should be detailed and well-structured with sections. "+
 				"Write approximately 5-10 pages worth of content.\n\n%s",
 			title, langName, text)
-		return h.callGroq(prompt)
+		return h.callLLM(prompt)
 	}
 
 	// Long book: chunk-wise summarization
@@ -124,7 +137,7 @@ func (h *SummaryHandler) generateSummary(title, text, lang string) (string, erro
 			"Summarize the following section (part %d of %d) of the book \"%s\" in %s. "+
 				"Cover all key points, arguments, examples, and insights. Be thorough.\n\n%s",
 			i+1, len(chunks), title, langName, chunk)
-		summary, err := h.callGroq(prompt)
+		summary, err := h.callLLM(prompt)
 		if err != nil {
 			return "", fmt.Errorf("chunk %d: %w", i+1, err)
 		}
@@ -140,7 +153,7 @@ func (h *SummaryHandler) generateSummary(title, text, lang string) (string, erro
 			"The final summary should cover all important points and be approximately 5-10 pages long.\n\n%s",
 		title, langName, combined)
 
-	return h.callGroq(finalPrompt)
+	return h.callLLM(finalPrompt)
 }
 
 type groqRequest struct {
@@ -162,6 +175,42 @@ type groqResponse struct {
 	Error *struct {
 		Message string `json:"message"`
 	} `json:"error"`
+}
+
+func (h *SummaryHandler) callOllama(prompt string) (string, error) {
+	type ollamaReq struct {
+		Model  string `json:"model"`
+		Prompt string `json:"prompt"`
+		Stream bool   `json:"stream"`
+	}
+	type ollamaResp struct {
+		Response string `json:"response"`
+		Error    string `json:"error,omitempty"`
+	}
+
+	reqBody := ollamaReq{Model: h.OllamaModel, Prompt: prompt, Stream: false}
+	jsonBody, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", err
+	}
+
+	client := &http.Client{Timeout: 10 * time.Minute}
+	resp, err := client.Post(h.OllamaURL+"/api/generate", "application/json", bytes.NewReader(jsonBody))
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+
+	var olResp ollamaResp
+	if err := json.Unmarshal(body, &olResp); err != nil {
+		return "", fmt.Errorf("ollama parse error: %s", string(body[:min(len(body), 200)]))
+	}
+	if olResp.Error != "" {
+		return "", fmt.Errorf("ollama: %s", olResp.Error)
+	}
+	return olResp.Response, nil
 }
 
 func (h *SummaryHandler) callGroq(prompt string) (string, error) {

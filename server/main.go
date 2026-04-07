@@ -45,7 +45,17 @@ func main() {
 	// Handlers
 	bookHandler := &handlers.BookHandler{DB: database, BooksDir: filepath.Join(dataDir, "books")}
 	ttsHandler := &handlers.TTSHandler{Engine: engine}
-	summaryHandler := &handlers.SummaryHandler{DB: database, BooksDir: filepath.Join(dataDir, "books"), APIKey: os.Getenv("GROQ_API_KEY")}
+	ollamaModel := os.Getenv("OLLAMA_MODEL")
+	if ollamaModel == "" {
+		ollamaModel = "gemma4:e2b"
+	}
+	summaryHandler := &handlers.SummaryHandler{
+		DB:          database,
+		BooksDir:    filepath.Join(dataDir, "books"),
+		APIKey:      os.Getenv("GROQ_API_KEY"),
+		OllamaURL:   os.Getenv("OLLAMA_URL"),
+		OllamaModel: ollamaModel,
+	}
 
 	// Startup cleanup
 	bookHandler.CleanupOrphanedFiles()

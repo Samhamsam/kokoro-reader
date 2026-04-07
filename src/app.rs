@@ -49,6 +49,7 @@ pub struct App {
     voices: Vec<Voice>,
     selected_voice: String,
     speed: f32,
+    pending_speed_restart: bool,
     status_msg: String,
     reading_active: bool,
     page_input: String,
@@ -106,6 +107,7 @@ impl App {
             voices: fetch_voices(&settings.server_url),
             selected_voice: String::from("kokoro_heart"),
             speed: 1.0,
+            pending_speed_restart: false,
             status_msg: String::new(),
             reading_active: false,
             last_queued_page: 0,
@@ -726,13 +728,19 @@ impl App {
                                     .color(TEXT_PRIMARY),
                             );
                             let old_speed = self.speed;
-                            ui.add(
+                            let speed_resp = ui.add(
                                 egui::Slider::new(&mut self.speed, 0.5..=2.0)
                                     .step_by(0.1)
                                     .show_value(false)
                                     .trailing_fill(true),
                             );
                             if (self.speed - old_speed).abs() > 0.01 && self.reading_active {
+                                self.pending_speed_restart = true;
+                            }
+                            if !self.reading_active {
+                                self.pending_speed_restart = false;
+                            }
+                            if self.pending_speed_restart && self.reading_active && !speed_resp.dragged() {
                                 // Capture local position BEFORE stop
                                 let local_idx = self.tts.local_sentence_index();
                                 let voice = self.selected_voice.clone();
@@ -740,6 +748,7 @@ impl App {
                                 self.last_queued_page = self.current_page;
                                 self.tts.speak(self.page_text.clone(), voice, self.speed, local_idx);
                                 self.queue_ahead(2);
+                                self.pending_speed_restart = false;
                             }
                         },
                     );

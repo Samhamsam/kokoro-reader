@@ -37,8 +37,8 @@ class ServerTtsEngine(private var serverUrl: String) {
     data class SentenceJob(val sentence: String, val globalIdx: Int, val isPageBoundary: Boolean, val isEnd: Boolean = false)
     private var sentenceQueue: LinkedBlockingQueue<SentenceJob>? = null
 
-    // Page boundary tracking (playback-based)
-    private val pageBoundaryIndices = mutableListOf<Int>()
+    // Page boundary tracking: (sentenceIndex, pageNumber)
+    private val pageBoundaries = mutableListOf<Pair<Int, Int>>()
     private var boundariesSignaled = 0
 
     var availableVoices: List<ServerVoice> = emptyList()
@@ -80,7 +80,7 @@ class ServerTtsEngine(private var serverUrl: String) {
         sentences = splitSentences.toMutableList()
         totalSentences = sentences.size
         currentSentence = skipSentences
-        pageBoundaryIndices.clear()
+        pageBoundaries.clear()
         boundariesSignaled = 0
 
         // Unbounded queue — sentences are lightweight, audio chunks are bounded separately
@@ -118,7 +118,9 @@ class ServerTtsEngine(private var serverUrl: String) {
                     if (job.isEnd) break
                     if (job.globalIdx < skipSentences) continue
 
-                    val wavData = requestTts(job.sentence, voiceId, currentSpeed)
+                    // Apply TTS pauses only for the server request, not for stored sentences
+                    val ttsText = TtsEngine.prepareForServer(job.sentence)
+                    val wavData = requestTts(ttsText, voiceId, currentSpeed)
                     if (!isCurrent()) break
 
                     if (wavData == null) {
@@ -201,7 +203,7 @@ class ServerTtsEngine(private var serverUrl: String) {
     }
 
     /** Append another page to the running session. Audio continues without interruption. */
-    fun appendPage(text: String) {
+    fun appendPage(text: String, pageNum: Int = -1) {
         val newSentences = TtsEngine.splitIntoSentences(text)
         if (newSentences.isEmpty()) return
 
@@ -209,8 +211,8 @@ class ServerTtsEngine(private var serverUrl: String) {
         sentences.addAll(newSentences)
         totalSentences = sentences.size
 
-        // Record page boundary
-        pageBoundaryIndices.add(offset)
+        // Record boundary with actual page number
+        pageBoundaries.add(Pair(offset, pageNum))
 
         val queue = sentenceQueue ?: return
         for ((i, s) in newSentences.withIndex()) {
@@ -223,17 +225,25 @@ class ServerTtsEngine(private var serverUrl: String) {
         sentenceQueue?.put(SentenceJob("", -1, false, isEnd = true))
     }
 
-    /** Check if playback has crossed a page boundary (based on currentSentence, not generation). */
-    fun checkPageBoundary(): Boolean {
-        while (boundariesSignaled < pageBoundaryIndices.size) {
-            val boundary = pageBoundaryIndices[boundariesSignaled]
-            if (currentSentence >= boundary) {
+    /** Check if playback has crossed a page boundary. Returns target page number or null. */
+    fun checkPageBoundary(): Int? {
+        while (boundariesSignaled < pageBoundaries.size) {
+            val (sentenceIdx, pageNum) = pageBoundaries[boundariesSignaled]
+            if (currentSentence >= sentenceIdx) {
                 boundariesSignaled++
-                return true
+                return pageNum
             }
             break
         }
-        return false
+        return null
+    }
+
+    /** Returns the local sentence index within the current page (for resume persistence). */
+    fun localSentenceIndex(): Int {
+        val pageStart = pageBoundaries
+            .lastOrNull { (sentIdx, _) -> sentIdx <= currentSentence }
+            ?.first ?: 0
+        return (currentSentence - pageStart).coerceAtLeast(0)
     }
 
     private fun wavToSamples(wavData: ByteArray): Pair<ShortArray, Int>? {

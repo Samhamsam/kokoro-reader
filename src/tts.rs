@@ -212,6 +212,21 @@ impl TtsEngine {
         (sents, playing)
     }
 
+    /// Returns the local sentence index within the currently visible page.
+    /// Uses page boundary data to subtract the offset of the current page's first sentence.
+    pub fn local_sentence_index(&self) -> usize {
+        self.update_playing_index();
+        let pb = self.playback.lock().unwrap();
+        let global_idx = pb.playing_idx;
+        // Find the highest boundary that's <= global_idx
+        let page_start = pb.page_boundaries.iter()
+            .rev()
+            .find(|(sent_idx, _)| *sent_idx <= global_idx)
+            .map(|(sent_idx, _)| *sent_idx)
+            .unwrap_or(0); // first page starts at 0
+        global_idx.saturating_sub(page_start)
+    }
+
     /// Check if playback has crossed a page boundary. Returns the page number to advance to.
     pub fn check_page_boundary(&self) -> Option<usize> {
         self.update_playing_index();

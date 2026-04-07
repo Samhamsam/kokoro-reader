@@ -56,6 +56,9 @@ fun ReaderScreen(
 
     val noopCallback: () -> Unit = {} // TTS engine callback does nothing — we poll instead
 
+    // Resume: use saved sentence only on first Play after opening
+    var resumeSentence by remember { mutableIntStateOf(book.last_sentence) }
+
     // Fetch voices from server on start
     LaunchedEffect(serverUrl) {
         ttsEngine.updateServerUrl(serverUrl)
@@ -105,28 +108,26 @@ fun ReaderScreen(
             if (newState != ttsState) ttsState = newState
             if (newSentence != currentSentenceIdx) currentSentenceIdx = newSentence
 
-            // Page boundary: audio reached the next page's first sentence
-            if (ttsEngine.checkPageBoundary()) {
-                if (currentPage + 1 < totalPages) {
-                    currentPage++
-                    // Render new page visually (async, doesn't block audio)
-                    val file = pdfFile
-                    if (file != null) {
-                        val result = withContext(Dispatchers.IO) { renderPage(file, currentPage) }
-                        bitmap = result?.first
-                        pageText = result?.second ?: ""
+            // Page boundary: audio reached the next page — jump to exact page
+            val targetPage = ttsEngine.checkPageBoundary()
+            if (targetPage != null && targetPage < totalPages) {
+                currentPage = targetPage
+                val file = pdfFile
+                if (file != null) {
+                    val result = withContext(Dispatchers.IO) { renderPage(file, currentPage) }
+                    bitmap = result?.first
+                    pageText = result?.second ?: ""
+                }
+                withContext(Dispatchers.IO) { library.updateProgress(bookId, currentPage, 0, selectedVoice, speed) }
+                // Queue one more page ahead
+                if (lastQueuedPage + 1 < totalPages) {
+                    lastQueuedPage++
+                    val file2 = pdfFile
+                    if (file2 != null) {
+                        val nextText = withContext(Dispatchers.IO) { extractPageText(file2, lastQueuedPage) }
+                        if (nextText.isNotBlank()) ttsEngine.appendPage(nextText, lastQueuedPage)
                     }
-                    withContext(Dispatchers.IO) { library.updateProgress(bookId, currentPage, 0, selectedVoice, speed) }
-                    // Queue one more page ahead (IO thread)
-                    if (lastQueuedPage + 1 < totalPages) {
-                        lastQueuedPage++
-                        val file2 = pdfFile
-                        if (file2 != null) {
-                            val nextText = withContext(Dispatchers.IO) { extractPageText(file2, lastQueuedPage) }
-                            if (nextText.isNotBlank()) ttsEngine.appendPage(nextText)
-                        }
-                        if (lastQueuedPage + 1 >= totalPages) ttsEngine.finishSession()
-                    }
+                    if (lastQueuedPage + 1 >= totalPages) ttsEngine.finishSession()
                 }
             }
 
@@ -165,7 +166,7 @@ fun ReaderScreen(
         onDispose {
             ttsEngine.stop()
             com.kokoro.reader.tts.TtsService.stop(context)
-            Thread { library.updateProgress(bookId, currentPage, ttsEngine.currentSentence, selectedVoice, speed) }.start()
+            Thread { library.updateProgress(bookId, currentPage, ttsEngine.localSentenceIndex(), selectedVoice, speed) }.start()
         }
     }
 
@@ -176,7 +177,7 @@ fun ReaderScreen(
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         TextButton(onClick = {
                             ttsEngine.stop()
-                            Thread { library.updateProgress(bookId, currentPage, ttsEngine.currentSentence, selectedVoice, speed) }.start()
+                            Thread { library.updateProgress(bookId, currentPage, ttsEngine.localSentenceIndex(), selectedVoice, speed) }.start()
                             onBack()
                         }) { Text("< Library", color = TextPrimary) }
 
@@ -224,7 +225,9 @@ fun ReaderScreen(
                                         lastQueuedPage = curPage
                                         coroutineScope.launch(Dispatchers.IO) {
                                             android.util.Log.i("KokoroReader", "IO: calling speak()")
-                                            ttsEngine.speak(textToSpeak, voiceToUse, speed)
+                                            val skip = resumeSentence
+                                            resumeSentence = 0 // only resume once
+                                            ttsEngine.speak(textToSpeak, voiceToUse, speed, skipSentences = skip)
                                             android.util.Log.i("KokoroReader", "IO: speak() returned")
                                             val file = pdfFile ?: return@launch
                                             for (n in 1..2) {
@@ -232,7 +235,7 @@ fun ReaderScreen(
                                                 if (nextPage < totalPages) {
                                                     lastQueuedPage = nextPage
                                                     val t = extractPageText(file, nextPage)
-                                                    if (t.isNotBlank()) ttsEngine.appendPage(t)
+                                                    if (t.isNotBlank()) ttsEngine.appendPage(t, nextPage)
                                                 }
                                             }
                                             if (lastQueuedPage + 1 >= totalPages) ttsEngine.finishSession()
@@ -307,7 +310,7 @@ fun ReaderScreen(
                                             if (lastQueuedPage + 1 < totalPages) {
                                                 lastQueuedPage++
                                                 val t = extractPageText(file, lastQueuedPage)
-                                                if (t.isNotBlank()) ttsEngine.appendPage(t)
+                                                if (t.isNotBlank()) ttsEngine.appendPage(t, lastQueuedPage)
                                             }
                                         }
                                         if (lastQueuedPage + 1 >= totalPages) ttsEngine.finishSession()

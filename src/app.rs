@@ -161,7 +161,7 @@ impl App {
         self.reading_active = false;
         // Save current progress
         if let AppMode::Reader { ref book_id } = self.mode {
-            let sentence = self.tts.current_sentences().1;
+            let sentence = self.tts.local_sentence_index();
                 self.library
                     .update_progress(book_id, self.current_page, sentence, &self.selected_voice, self.speed);
         }

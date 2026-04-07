@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Kokoro Reader
+Comment=PDF Reader with Text-to-Speech
+Exec=kokoro-reader
+Icon=kokoro-reader
+Terminal=false
+Type=Application
+Categories=Office;Viewer;AudioVideo;
+MimeType=application/pdf;

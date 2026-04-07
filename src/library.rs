@@ -19,6 +19,8 @@ pub struct Settings {
 }
 
 fn default_speed() -> f32 { 1.0 }
+fn default_version() -> u64 { 1 }
+fn default_updated_at() -> u64 { 0 }
 
 fn default_server_url() -> String { "http://localhost:8787".to_string() }
 
@@ -55,6 +57,10 @@ pub struct BookEntry {
     pub selected_voice_id: String,
     #[serde(default = "default_speed")]
     pub speed: f32,
+    #[serde(default = "default_version")]
+    pub version: u64,
+    #[serde(default = "default_updated_at")]
+    pub updated_at: u64,
     pub last_accessed: u64,
 }
 
@@ -75,6 +81,12 @@ pub struct Library {
     pub server_url: String,
     pub books: Vec<BookEntry>,
     cache_dir: PathBuf,
+}
+
+pub enum ProgressSyncResult {
+    Updated(BookEntry),
+    Conflict(BookEntry),
+    Failed(String),
 }
 
 impl Library {
@@ -100,6 +112,16 @@ impl Library {
                 self.books = books;
             }
         }
+    }
+
+    pub fn fetch_book(&mut self, id: &str) -> Option<BookEntry> {
+        let url = format!("{}/api/books/{}", self.server_url, id);
+        let book = reqwest::blocking::get(&url)
+            .ok()?
+            .json::<BookEntry>()
+            .ok()?;
+        self.upsert_book(book.clone());
+        Some(book)
     }
 
     pub fn import(&mut self, path: &Path) -> Result<String, String> {
@@ -143,26 +165,44 @@ impl Library {
         }
     }
 
-    pub fn update_progress(&mut self, id: &str, page: usize, sentence: usize, voice_id: &str, speed: f32) {
+    pub fn update_progress(&mut self, id: &str, page: usize, sentence: usize, voice_id: &str, speed: f32) -> ProgressSyncResult {
         let client = reqwest::blocking::Client::new();
-        let ok = client
+        let base_version = self.books.iter().find(|b| b.id == id).map(|b| b.version).unwrap_or(0);
+        let resp = client
             .put(format!("{}/api/books/{}/progress", self.server_url, id))
             .json(&serde_json::json!({
                 "last_page": page,
                 "last_sentence": sentence,
                 "selected_voice_id": voice_id,
-                "speed": speed
+                "speed": speed,
+                "base_version": base_version
             }))
-            .send()
-            .map(|r| r.status().is_success())
-            .unwrap_or(false);
-        if ok {
-            if let Some(book) = self.books.iter_mut().find(|b| b.id == id) {
-                book.last_page = page;
-                book.last_sentence = sentence;
-                book.selected_voice_id = voice_id.to_string();
-                book.speed = speed;
+            .send();
+        match resp {
+            Ok(resp) => {
+                let status = resp.status();
+                if status.is_success() {
+                    match resp.json::<BookEntry>() {
+                        Ok(book) => {
+                            self.upsert_book(book.clone());
+                            ProgressSyncResult::Updated(book)
+                        }
+                        Err(e) => ProgressSyncResult::Failed(format!("Parse error: {}", e)),
+                    }
+                } else if status.as_u16() == 409 {
+                    match resp.json::<BookEntry>() {
+                        Ok(book) => {
+                            self.upsert_book(book.clone());
+                            ProgressSyncResult::Conflict(book)
+                        }
+                        Err(e) => ProgressSyncResult::Failed(format!("Parse error: {}", e)),
+                    }
+                } else {
+                    let msg = resp.text().unwrap_or_default();
+                    ProgressSyncResult::Failed(format!("Server error: {}", msg))
+                }
             }
+            Err(e) => ProgressSyncResult::Failed(format!("Request error: {}", e)),
         }
     }
 
@@ -199,6 +239,14 @@ impl Library {
                     }
                 }
             }
+        }
+    }
+
+    fn upsert_book(&mut self, book: BookEntry) {
+        if let Some(existing) = self.books.iter_mut().find(|b| b.id == book.id) {
+            *existing = book;
+        } else {
+            self.books.push(book);
         }
     }
 }

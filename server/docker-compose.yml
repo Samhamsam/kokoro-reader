@@ -1,0 +1,12 @@
+services:
+  kokoro-server:
+    build: .
+    ports:
+      - "8787:8787"
+    volumes:
+      - ./models-tts:/app/models-tts:ro
+      - kokoro-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  kokoro-data:

@@ -74,6 +74,8 @@ func main() {
 			bookHandler.GetFile(w, r, id)
 		case sub == "progress" && r.Method == http.MethodPut:
 			bookHandler.UpdateProgress(w, r, id)
+		case sub == "" && r.Method == http.MethodGet:
+			bookHandler.Get(w, r, id)
 		case sub == "" && r.Method == http.MethodDelete:
 			bookHandler.Delete(w, r, id)
 		default:

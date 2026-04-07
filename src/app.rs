@@ -1,4 +1,4 @@
-use crate::library::Library;
+use crate::library::{BookEntry, Library, ProgressSyncResult};
 use crate::pdf::{PageRender, PdfDoc};
 use crate::tts::{TtsEngine, TtsState, Voice, fetch_voices};
 use egui::{
@@ -50,6 +50,7 @@ pub struct App {
     selected_voice: String,
     speed: f32,
     pending_speed_restart: bool,
+    pending_speed_save: bool,
     status_msg: String,
     reading_active: bool,
     page_input: String,
@@ -108,6 +109,7 @@ impl App {
             selected_voice: String::from("kokoro_heart"),
             speed: 1.0,
             pending_speed_restart: false,
+            pending_speed_save: false,
             status_msg: String::new(),
             reading_active: false,
             last_queued_page: 0,
@@ -145,7 +147,8 @@ impl App {
     }
 
     fn open_book(&mut self, book_id: &str) {
-        if let Some(book) = self.library.get(book_id) {
+        let fresh_book = self.library.fetch_book(book_id);
+        if let Some(book) = fresh_book.as_ref().or_else(|| self.library.get(book_id)) {
             let path = self.library.get_pdf_path(&book.id).unwrap_or_default();
             let start_page = book.last_page;
             self.selected_voice = book.selected_voice_id.clone();
@@ -163,8 +166,10 @@ impl App {
         let sentence = self.tts.local_sentence_index();
         self.tts.stop();
         self.reading_active = false;
+        self.pending_speed_restart = false;
+        self.pending_speed_save = false;
         if let AppMode::Reader { ref book_id } = self.mode {
-            self.library
+            let _ = self.library
                 .update_progress(book_id, self.current_page, sentence, &self.selected_voice, self.speed);
         }
         self.pdf = None;
@@ -172,11 +177,49 @@ impl App {
         self.mode = AppMode::Library;
     }
 
+    fn sync_before_play(&mut self, book_id: &str, ctx: &egui::Context) {
+        let Some(book) = self.library.fetch_book(book_id) else {
+            return;
+        };
+
+        if !book.selected_voice_id.is_empty() {
+            self.selected_voice = book.selected_voice_id.clone();
+        }
+        if book.speed > 0.0 {
+            self.speed = book.speed;
+        }
+        self.resume_sentence = book.last_sentence;
+        self.last_queued_page = book.last_page;
+
+        if self.current_page != book.last_page {
+            self.current_page = book.last_page;
+            self.page_input = format!("{}", self.current_page + 1);
+            self.page_texture = None;
+            if let Some(ref pdf) = self.pdf {
+                if let Ok(render) = pdf.render_page(self.current_page, 1200) {
+                    self.apply_render(render, ctx);
+                }
+            }
+        }
+    }
+
+    fn sync_reader_position(&mut self, sentence: usize) {
+        self.resume_sentence = sentence;
+        if let AppMode::Reader { ref book_id } = self.mode {
+            let sync = self
+                .library
+                .update_progress(book_id, self.current_page, sentence, &self.selected_voice, self.speed);
+            self.handle_progress_sync(sync);
+        }
+    }
+
     // ── Reader actions ──
 
     fn open_pdf(&mut self, path: PathBuf, start_page: usize) {
         self.tts.stop();
         self.reading_active = false;
+        self.pending_speed_restart = false;
+        self.pending_speed_save = false;
         self.pdf = None;
         self.page_texture = None;
         self.loading = true;
@@ -259,7 +302,63 @@ impl App {
             }
             // Save progress
             if let AppMode::Reader { ref book_id } = self.mode {
-                self.library.update_progress(book_id, page, 0, &self.selected_voice, self.speed);
+                let sync = self.library.update_progress(book_id, page, 0, &self.selected_voice, self.speed);
+                self.handle_progress_sync(sync);
+            }
+        }
+    }
+
+    fn apply_remote_progress(&mut self, book: &BookEntry, stop_audio: bool) {
+        if stop_audio {
+            self.tts.stop();
+            self.reading_active = false;
+        }
+
+        self.selected_voice = if book.selected_voice_id.is_empty() {
+            self.selected_voice.clone()
+        } else {
+            book.selected_voice_id.clone()
+        };
+        if book.speed > 0.0 {
+            self.speed = book.speed;
+        }
+        self.resume_sentence = book.last_sentence;
+        self.last_queued_page = book.last_page;
+
+        if self.current_page != book.last_page {
+            self.current_page = book.last_page;
+            self.page_input = format!("{}", self.current_page + 1);
+            self.page_texture = None;
+            if let Some(ref pdf) = self.pdf {
+                if let Ok(render) = pdf.render_page(self.current_page, 1200) {
+                    self.needs_render_data = Some(render);
+                }
+            }
+        }
+    }
+
+    fn handle_progress_sync(&mut self, sync: ProgressSyncResult) {
+        match sync {
+            ProgressSyncResult::Updated(book) => {
+                if let AppMode::Reader { ref book_id } = self.mode {
+                    if book.id == *book_id {
+                        self.apply_remote_progress(&book, false);
+                    }
+                }
+            }
+            ProgressSyncResult::Conflict(book) => {
+                if let AppMode::Reader { ref book_id } = self.mode {
+                    if book.id == *book_id {
+                        self.status_msg = format!(
+                            "Progress changed on another device. Synced to page {}.",
+                            book.last_page + 1
+                        );
+                        self.apply_remote_progress(&book, true);
+                    }
+                }
+            }
+            ProgressSyncResult::Failed(err) => {
+                self.status_msg = format!("Sync failed: {}", err);
             }
         }
     }
@@ -534,10 +633,13 @@ impl App {
                 }
                 // Save progress
                 if let AppMode::Reader { ref book_id } = self.mode {
-                    self.library.update_progress(book_id, self.current_page, 0, &self.selected_voice, self.speed);
+                    let sync = self.library.update_progress(book_id, self.current_page, 0, &self.selected_voice, self.speed);
+                    self.handle_progress_sync(sync);
                 }
                 // Queue one more page ahead (maintains rolling buffer)
-                self.queue_ahead(1);
+                if self.reading_active {
+                    self.queue_ahead(1);
+                }
             }
         }
 
@@ -660,6 +762,13 @@ impl App {
                                     .fill(GREEN)
                                     .corner_radius(egui::CornerRadius::same(6));
                                     if ui.add_enabled(can_play, btn).clicked() {
+                                        let current_book_id = match &self.mode {
+                                            AppMode::Reader { book_id } => Some(book_id.clone()),
+                                            _ => None,
+                                        };
+                                        if let Some(book_id) = current_book_id {
+                                            self.sync_before_play(&book_id, ctx);
+                                        }
                                         self.start_reading();
                                     }
                                 }
@@ -674,11 +783,15 @@ impl App {
                                 }
                                 TtsState::Playing => {
                                     if styled_button(ui, "Pause", AMBER).clicked() {
+                                        let sentence = self.tts.local_sentence_index();
                                         self.tts.pause();
+                                        self.sync_reader_position(sentence);
                                     }
                                     if styled_button(ui, "Stop", RED).clicked() {
+                                        let sentence = self.tts.local_sentence_index();
                                         self.tts.stop();
                                         self.reading_active = false;
+                                        self.sync_reader_position(sentence);
                                     }
                                     ctx.request_repaint();
                                 }
@@ -687,8 +800,10 @@ impl App {
                                         self.tts.resume();
                                     }
                                     if styled_button(ui, "Stop", RED).clicked() {
+                                        let sentence = self.tts.local_sentence_index();
                                         self.tts.stop();
                                         self.reading_active = false;
+                                        self.sync_reader_position(sentence);
                                     }
                                 }
                             }
@@ -734,21 +849,43 @@ impl App {
                                     .show_value(false)
                                     .trailing_fill(true),
                             );
-                            if (self.speed - old_speed).abs() > 0.01 && self.reading_active {
-                                self.pending_speed_restart = true;
+                            if (self.speed - old_speed).abs() > 0.01 {
+                                self.pending_speed_save = true;
+                                if self.reading_active {
+                                    self.pending_speed_restart = true;
+                                }
                             }
                             if !self.reading_active {
                                 self.pending_speed_restart = false;
                             }
-                            if self.pending_speed_restart && self.reading_active && !speed_resp.dragged() {
-                                // Capture local position BEFORE stop
-                                let local_idx = self.tts.local_sentence_index();
-                                let voice = self.selected_voice.clone();
-                                self.tts.stop();
-                                self.last_queued_page = self.current_page;
-                                self.tts.speak(self.page_text.clone(), voice, self.speed, local_idx);
-                                self.queue_ahead(2);
+                            if self.pending_speed_save && !speed_resp.dragged() {
+                                let local_idx = if self.reading_active {
+                                    self.tts.local_sentence_index()
+                                } else {
+                                    self.resume_sentence
+                                };
+
+                                if let AppMode::Reader { ref book_id } = self.mode {
+                                    let sync = self.library.update_progress(
+                                        book_id,
+                                        self.current_page,
+                                        local_idx,
+                                        &self.selected_voice,
+                                        self.speed,
+                                    );
+                                    self.handle_progress_sync(sync);
+                                }
+
+                                if self.pending_speed_restart && self.reading_active {
+                                    let voice = self.selected_voice.clone();
+                                    self.tts.stop();
+                                    self.last_queued_page = self.current_page;
+                                    self.tts.speak(self.page_text.clone(), voice, self.speed, local_idx);
+                                    self.queue_ahead(2);
+                                }
+
                                 self.pending_speed_restart = false;
+                                self.pending_speed_save = false;
                             }
                         },
                     );

@@ -20,6 +20,12 @@ class Library(private val serverUrl: String, private val cacheDir: File) {
         // Callers must call refresh() from a background thread/coroutine.
     }
 
+    data class ProgressSyncResult(
+        val book: BookEntry? = null,
+        val conflicted: Boolean = false,
+        val failed: Boolean = false
+    )
+
     fun refresh() {
         try {
             val conn = URL("$serverUrl/api/books").openConnection() as HttpURLConnection
@@ -31,6 +37,25 @@ class Library(private val serverUrl: String, private val cacheDir: File) {
             pruneCache()
         } catch (e: Exception) {
             e.printStackTrace()
+        }
+    }
+
+    fun fetchBook(id: String): BookEntry? {
+        return try {
+            val conn = URL("$serverUrl/api/books/$id").openConnection() as HttpURLConnection
+            conn.connectTimeout = 5000; conn.readTimeout = 5000
+            if (conn.responseCode !in 200..299) {
+                conn.disconnect()
+                return null
+            }
+            val json = conn.inputStream.bufferedReader().readText()
+            conn.disconnect()
+            val book = gson.fromJson(json, BookEntry::class.java)
+            upsertBook(book)
+            book
+        } catch (e: Exception) {
+            e.printStackTrace()
+            null
         }
     }
 
@@ -91,24 +116,32 @@ class Library(private val serverUrl: String, private val cacheDir: File) {
         }
     }
 
-    fun updateProgress(id: String, page: Int, sentence: Int, voiceId: String, speed: Float = 1.0f) {
-        val ok = try {
+    fun updateProgress(id: String, page: Int, sentence: Int, voiceId: String, speed: Float = 1.0f): ProgressSyncResult {
+        return try {
+            val baseVersion = books.find { it.id == id }?.version ?: 0L
             val conn = URL("$serverUrl/api/books/$id/progress").openConnection() as HttpURLConnection
             conn.requestMethod = "PUT"
             conn.doOutput = true
             conn.setRequestProperty("Content-Type", "application/json")
             conn.connectTimeout = 5000; conn.readTimeout = 5000
-            conn.outputStream.write("""{"last_page":$page,"last_sentence":$sentence,"selected_voice_id":"$voiceId","speed":$speed}""".toByteArray())
+            conn.outputStream.write("""{"last_page":$page,"last_sentence":$sentence,"selected_voice_id":"$voiceId","speed":$speed,"base_version":$baseVersion}""".toByteArray())
             val code = conn.responseCode
-            conn.disconnect()
-            code in 200..299
-        } catch (_: Exception) { false }
-
-        if (ok) {
-            books.find { it.id == id }?.let { book ->
-                val idx = books.indexOf(book)
-                books[idx] = book.copy(last_page = page, last_sentence = sentence, selected_voice_id = voiceId, speed = speed)
+            if (code in 200..299 || code == 409) {
+                val json = (if (code == 409) conn.errorStream else conn.inputStream)
+                    ?.bufferedReader()
+                    ?.readText()
+                if (!json.isNullOrBlank()) {
+                    val book = gson.fromJson(json, BookEntry::class.java)
+                    upsertBook(book)
+                    conn.disconnect()
+                    return ProgressSyncResult(book = book, conflicted = code == 409)
+                }
             }
+            conn.disconnect()
+            ProgressSyncResult(failed = code !in 200..299 && code != 409)
+        } catch (e: Exception) {
+            e.printStackTrace()
+            ProgressSyncResult(failed = true)
         }
     }
 
@@ -137,6 +170,15 @@ class Library(private val serverUrl: String, private val cacheDir: File) {
                 val id = file.name.removeSuffix(".pdf")
                 if (id !in validIds) file.delete()
             }
+        }
+    }
+
+    private fun upsertBook(book: BookEntry) {
+        val idx = books.indexOfFirst { it.id == book.id }
+        if (idx >= 0) {
+            books[idx] = book
+        } else {
+            books.add(book)
         }
     }
 }

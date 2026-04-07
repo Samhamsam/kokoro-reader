@@ -36,6 +36,7 @@ fun ReaderScreen(
     val book = library.books.find { it.id == bookId } ?: run { onBack(); return }
     val context = androidx.compose.ui.platform.LocalContext.current
     var pdfFile by remember { mutableStateOf<File?>(null) }
+    var currentBook by remember { mutableStateOf(book) }
 
     var currentPage by remember { mutableIntStateOf(book.last_page) }
     var totalPages by remember { mutableIntStateOf(book.total_pages) }
@@ -44,6 +45,7 @@ fun ReaderScreen(
     var loading by remember { mutableStateOf(true) }
     var speed by remember { mutableFloatStateOf(if (book.speed > 0f) book.speed else 1.0f) }
     var voiceMenuExpanded by remember { mutableStateOf(false) }
+    var hasLoadedInitialPage by remember { mutableStateOf(false) }
 
     // TTS via server
     val ttsEngine = remember { ServerTtsEngine(serverUrl) }
@@ -53,11 +55,112 @@ fun ReaderScreen(
     var currentSentenceIdx by remember { mutableIntStateOf(0) }
     var readingActive by remember { mutableStateOf(false) }
     var serverConnected by remember { mutableStateOf(false) }
+    var lastQueuedPage by remember { mutableIntStateOf(currentPage) }
 
     val noopCallback: () -> Unit = {} // TTS engine callback does nothing — we poll instead
 
     // Resume: use saved sentence only on first Play after opening
     var resumeSentence by remember { mutableIntStateOf(book.last_sentence) }
+    val coroutineScope = rememberCoroutineScope()
+
+    fun applyRemoteBook(remote: com.kokoro.reader.data.BookEntry, stopPlayback: Boolean) {
+        currentBook = remote
+        totalPages = remote.total_pages
+        if (remote.selected_voice_id.isNotEmpty()) {
+            selectedVoice = remote.selected_voice_id
+        }
+        if (remote.speed > 0f) {
+            speed = remote.speed
+        }
+        lastQueuedPage = remote.last_page
+        resumeSentence = remote.last_sentence
+        if (stopPlayback) {
+            ttsEngine.stop()
+            readingActive = false
+            com.kokoro.reader.tts.TtsService.stop(context)
+        }
+        if (currentPage != remote.last_page) {
+            hasLoadedInitialPage = false
+            currentPage = remote.last_page
+        }
+    }
+
+    fun syncLocalSentence(sentenceIdx: Int, stopPlayback: Boolean) {
+        resumeSentence = sentenceIdx
+        if (stopPlayback) {
+            ttsEngine.stop()
+            readingActive = false
+            ttsState = ttsEngine.state
+            com.kokoro.reader.tts.TtsService.stop(context)
+        }
+        coroutineScope.launch {
+            val syncResult = withContext(Dispatchers.IO) {
+                library.updateProgress(bookId, currentPage, sentenceIdx, selectedVoice, speed)
+            }
+            syncResult.book?.let { remote ->
+                if (syncResult.conflicted) {
+                    applyRemoteBook(remote, stopPlayback = true)
+                } else {
+                    currentBook = remote
+                }
+            }
+        }
+    }
+
+    fun startPlaybackFromLatest() {
+        coroutineScope.launch {
+            loading = true
+
+            val fresh = withContext(Dispatchers.IO) { library.fetchBook(bookId) }
+            val remote = fresh ?: currentBook
+            applyRemoteBook(remote, stopPlayback = false)
+
+            val targetPage = remote.last_page
+            val targetVoice = remote.selected_voice_id.ifEmpty { selectedVoice }
+            val targetSpeed = if (remote.speed > 0f) remote.speed else speed
+            val targetSkip = remote.last_sentence
+
+            val file = pdfFile ?: withContext(Dispatchers.IO) { library.getBookFile(remote.id) }
+            pdfFile = file
+
+            val result = withContext(Dispatchers.IO) { renderPage(file, targetPage) }
+            currentPage = targetPage
+            bitmap = result?.first
+            pageText = result?.second ?: ""
+            totalPages = if (remote.total_pages > 0) remote.total_pages else withContext(Dispatchers.IO) { getPageCount(file) }
+            selectedVoice = targetVoice
+            speed = targetSpeed
+            lastQueuedPage = targetPage
+            resumeSentence = 0
+            loading = false
+
+            if (pageText.isBlank()) return@launch
+
+            readingActive = true
+            com.kokoro.reader.tts.TtsService.start(context)
+            withContext(Dispatchers.IO) {
+                ttsEngine.speak(pageText, targetVoice, targetSpeed, skipSentences = targetSkip)
+                val cachedFile = pdfFile ?: return@withContext
+                for (n in 1..2) {
+                    val nextPage = lastQueuedPage + 1
+                    if (nextPage < totalPages) {
+                        lastQueuedPage = nextPage
+                        val t = try {
+                            val doc = com.tom_roush.pdfbox.pdmodel.PDDocument.load(cachedFile)
+                            val stripper = com.tom_roush.pdfbox.text.PDFTextStripper()
+                            stripper.startPage = nextPage + 1
+                            stripper.endPage = nextPage + 1
+                            val text = stripper.getText(doc).trim()
+                            doc.close()
+                            text
+                        } catch (_: Exception) { "" }
+                        if (t.isNotBlank()) ttsEngine.appendPage(t, nextPage)
+                    }
+                }
+                if (lastQueuedPage + 1 >= totalPages) ttsEngine.finishSession()
+            }
+        }
+    }
 
     // Fetch voices from server on start
     LaunchedEffect(serverUrl) {
@@ -71,8 +174,11 @@ fun ReaderScreen(
         }
     }
 
-    var lastQueuedPage by remember { mutableIntStateOf(currentPage) }
-    val coroutineScope = rememberCoroutineScope()
+    // Pull the freshest server state before the reader starts interacting with it.
+    LaunchedEffect(bookId) {
+        val fresh = withContext(Dispatchers.IO) { library.fetchBook(bookId) } ?: return@LaunchedEffect
+        if (!readingActive) applyRemoteBook(fresh, stopPlayback = false)
+    }
 
     // Helper: extract text from a page (IO thread)
     fun extractPageText(file: File, pageIdx: Int): String {
@@ -118,7 +224,20 @@ fun ReaderScreen(
                     bitmap = result?.first
                     pageText = result?.second ?: ""
                 }
-                withContext(Dispatchers.IO) { library.updateProgress(bookId, currentPage, 0, selectedVoice, speed) }
+                val syncResult = withContext(Dispatchers.IO) {
+                    library.updateProgress(bookId, currentPage, 0, selectedVoice, speed)
+                }
+                syncResult.book?.let { remote ->
+                    if (syncResult.conflicted) {
+                        applyRemoteBook(remote, stopPlayback = true)
+                    } else {
+                        currentBook = remote
+                    }
+                }
+                if (syncResult.conflicted || !readingActive) {
+                    kotlinx.coroutines.delay(200)
+                    continue
+                }
                 // Queue one more page ahead
                 if (lastQueuedPage + 1 < totalPages) {
                     lastQueuedPage++
@@ -147,7 +266,7 @@ fun ReaderScreen(
             loading = true
             // Download PDF on IO thread if not cached
             if (pdfFile == null || !pdfFile!!.exists()) {
-                pdfFile = withContext(Dispatchers.IO) { library.getBookFile(book.id) }
+                pdfFile = withContext(Dispatchers.IO) { library.getBookFile(currentBook.id) }
             }
             val file = pdfFile ?: run { loading = false; return@LaunchedEffect }
             val result = withContext(Dispatchers.IO) { renderPage(file, currentPage) }
@@ -158,7 +277,20 @@ fun ReaderScreen(
             if (totalPages == 0) {
                 totalPages = withContext(Dispatchers.IO) { getPageCount(file) }
             }
-            withContext(Dispatchers.IO) { library.updateProgress(bookId, currentPage, 0, selectedVoice, speed) }
+            if (hasLoadedInitialPage) {
+                val syncResult = withContext(Dispatchers.IO) {
+                    library.updateProgress(bookId, currentPage, 0, selectedVoice, speed)
+                }
+                syncResult.book?.let { remote ->
+                    if (syncResult.conflicted) {
+                        applyRemoteBook(remote, stopPlayback = false)
+                    } else {
+                        currentBook = remote
+                    }
+                }
+            } else {
+                hasLoadedInitialPage = true
+            }
         }
     }
 
@@ -218,30 +350,7 @@ fun ReaderScreen(
                             TtsState.IDLE, TtsState.FINISHED, TtsState.ERROR -> {
                                 Button(
                                     onClick = {
-                                        val textToSpeak = pageText
-                                        val voiceToUse = selectedVoice
-                                        val curPage = currentPage
-                                        android.util.Log.i("KokoroReader", "PLAY clicked: page=$curPage voice=$voiceToUse textLen=${textToSpeak.length} connected=$serverConnected")
-                                        readingActive = true
-                                        com.kokoro.reader.tts.TtsService.start(context)
-                                        lastQueuedPage = curPage
-                                        coroutineScope.launch(Dispatchers.IO) {
-                                            android.util.Log.i("KokoroReader", "IO: calling speak()")
-                                            val skip = resumeSentence
-                                            resumeSentence = 0 // only resume once
-                                            ttsEngine.speak(textToSpeak, voiceToUse, speed, skipSentences = skip)
-                                            android.util.Log.i("KokoroReader", "IO: speak() returned")
-                                            val file = pdfFile ?: return@launch
-                                            for (n in 1..2) {
-                                                val nextPage = lastQueuedPage + 1
-                                                if (nextPage < totalPages) {
-                                                    lastQueuedPage = nextPage
-                                                    val t = extractPageText(file, nextPage)
-                                                    if (t.isNotBlank()) ttsEngine.appendPage(t, nextPage)
-                                                }
-                                            }
-                                            if (lastQueuedPage + 1 >= totalPages) ttsEngine.finishSession()
-                                        }
+                                        startPlaybackFromLatest()
                                     },
                                     enabled = pageText.isNotBlank() && serverConnected,
                                     colors = ButtonDefaults.buttonColors(containerColor = Green)
@@ -253,11 +362,19 @@ fun ReaderScreen(
                             }
                             TtsState.PLAYING -> {
                                 Button(
-                                    onClick = { ttsEngine.pause(); ttsState = ttsEngine.state },
+                                    onClick = {
+                                        val sentenceIdx = ttsEngine.localSentenceIndex()
+                                        ttsEngine.pause()
+                                        ttsState = ttsEngine.state
+                                        syncLocalSentence(sentenceIdx, stopPlayback = false)
+                                    },
                                     colors = ButtonDefaults.buttonColors(containerColor = Amber)
                                 ) { Text("Pause") }
                                 Button(
-                                    onClick = { ttsEngine.stop(); readingActive = false; com.kokoro.reader.tts.TtsService.stop(context); ttsState = ttsEngine.state },
+                                    onClick = {
+                                        val sentenceIdx = ttsEngine.localSentenceIndex()
+                                        syncLocalSentence(sentenceIdx, stopPlayback = true)
+                                    },
                                     colors = ButtonDefaults.buttonColors(containerColor = Red)
                                 ) { Text("Stop") }
                             }
@@ -267,7 +384,10 @@ fun ReaderScreen(
                                     colors = ButtonDefaults.buttonColors(containerColor = Green)
                                 ) { Text("Resume") }
                                 Button(
-                                    onClick = { ttsEngine.stop(); readingActive = false; com.kokoro.reader.tts.TtsService.stop(context); ttsState = ttsEngine.state },
+                                    onClick = {
+                                        val sentenceIdx = ttsEngine.localSentenceIndex()
+                                        syncLocalSentence(sentenceIdx, stopPlayback = true)
+                                    },
                                     colors = ButtonDefaults.buttonColors(containerColor = Red)
                                 ) { Text("Stop") }
                             }
@@ -294,32 +414,57 @@ fun ReaderScreen(
 
                     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
                         Text("Speed: ${String.format("%.1f", speed)}x", color = TextDim, fontSize = 12.sp)
-                        Slider(value = speed, onValueChange = { raw ->
-                            val newSpeed = (Math.round(raw * 10f) / 10f) // round to 0.1
-                            if (newSpeed != speed) {
-                                speed = newSpeed
-                                ttsEngine.setSpeed(newSpeed)
-                                // Restart from current sentence with new speed
-                                if (readingActive) {
-                                    val localIdx = ttsEngine.localSentenceIndex() // capture BEFORE stop
-                                    ttsEngine.stop()
-                                    coroutineScope.launch(Dispatchers.IO) {
-                                        ttsEngine.speak(pageText, selectedVoice, newSpeed, skipSentences = localIdx)
-                                        // Re-queue ahead
-                                        val file = pdfFile ?: return@launch
-                                        lastQueuedPage = currentPage
-                                        for (n in 1..2) {
-                                            if (lastQueuedPage + 1 < totalPages) {
-                                                lastQueuedPage++
-                                                val t = extractPageText(file, lastQueuedPage)
-                                                if (t.isNotBlank()) ttsEngine.appendPage(t, lastQueuedPage)
-                                            }
+                        Slider(
+                            value = speed,
+                            onValueChange = { raw ->
+                                val newSpeed = (Math.round(raw * 10f) / 10f) // round to 0.1
+                                if (newSpeed != speed) {
+                                    speed = newSpeed
+                                    ttsEngine.setSpeed(newSpeed)
+                                }
+                            },
+                            onValueChangeFinished = {
+                                val sentenceIdx = if (readingActive) ttsEngine.localSentenceIndex() else resumeSentence
+                                coroutineScope.launch {
+                                    val syncResult = withContext(Dispatchers.IO) {
+                                        library.updateProgress(bookId, currentPage, sentenceIdx, selectedVoice, speed)
+                                    }
+                                    syncResult.book?.let { remote ->
+                                        if (syncResult.conflicted) {
+                                            applyRemoteBook(remote, stopPlayback = true)
+                                            return@launch
+                                        } else {
+                                            currentBook = remote
                                         }
-                                        if (lastQueuedPage + 1 >= totalPages) ttsEngine.finishSession()
+                                    }
+
+                                    if (readingActive) {
+                                        ttsEngine.stop()
+                                        val localPageText = pageText
+                                        val localVoice = selectedVoice
+                                        val newSpeed = speed
+                                        lastQueuedPage = currentPage
+                                        withContext(Dispatchers.IO) {
+                                            ttsEngine.speak(localPageText, localVoice, newSpeed, skipSentences = sentenceIdx)
+                                            val file = pdfFile ?: return@withContext
+                                            for (n in 1..2) {
+                                                if (lastQueuedPage + 1 < totalPages) {
+                                                    lastQueuedPage++
+                                                    val t = extractPageText(file, lastQueuedPage)
+                                                    if (t.isNotBlank()) ttsEngine.appendPage(t, lastQueuedPage)
+                                                }
+                                            }
+                                            if (lastQueuedPage + 1 >= totalPages) ttsEngine.finishSession()
+                                        }
+                                    } else {
+                                        resumeSentence = sentenceIdx
                                     }
                                 }
-                            }
-                        }, valueRange = 0.5f..2.0f, steps = 14, modifier = Modifier.weight(1f))
+                            },
+                            valueRange = 0.5f..2.0f,
+                            steps = 14,
+                            modifier = Modifier.weight(1f)
+                        )
                     }
                 }
             }

@@ -107,15 +107,34 @@ func (h *BookHandler) GetFile(w http.ResponseWriter, r *http.Request, id string)
 	http.ServeFile(w, r, path)
 }
 
+func (h *BookHandler) Get(w http.ResponseWriter, r *http.Request, id string) {
+	book, err := h.DB.GetBook(id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if book == nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(book)
+}
+
 func (h *BookHandler) UpdateProgress(w http.ResponseWriter, r *http.Request, id string) {
 	var p db.ProgressUpdate
 	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
-	if err := h.DB.UpdateProgress(id, p); err != nil {
+	book, err := h.DB.UpdateProgress(id, p)
+	if err != nil {
 		if err.Error() == "not found" {
 			http.Error(w, "book not found", http.StatusNotFound)
+		} else if conflict, ok := db.IsConflict(err); ok {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			json.NewEncoder(w).Encode(conflict.Current)
 		} else if strings.HasPrefix(err.Error(), "invalid") {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 		} else {
@@ -123,7 +142,8 @@ func (h *BookHandler) UpdateProgress(w http.ResponseWriter, r *http.Request, id 
 		}
 		return
 	}
-	w.WriteHeader(http.StatusOK)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(book)
 }
 
 func (h *BookHandler) Delete(w http.ResponseWriter, r *http.Request, id string) {

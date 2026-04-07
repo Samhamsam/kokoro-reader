@@ -1,0 +1,6 @@
+data/
+models-tts/
+kokoro-server
+*.db
+*.db-wal
+*.db-shm

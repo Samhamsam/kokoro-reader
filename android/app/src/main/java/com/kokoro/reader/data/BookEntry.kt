@@ -10,6 +10,8 @@ data class BookEntry(
     val selected_voice: Int = 0, // legacy, kept for Desktop compat
     val selected_voice_id: String = "",
     val speed: Float = 1.0f,
+    val version: Long = 1,
+    val updated_at: Long = 0,
     val last_accessed: Long = 0
 ) {
     val progress: Float

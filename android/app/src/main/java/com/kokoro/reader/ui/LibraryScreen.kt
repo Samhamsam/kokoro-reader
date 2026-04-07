@@ -111,7 +111,13 @@ fun LibraryScreen(
                     items(filtered, key = { it.id }) { book ->
                         BookCard(
                             book = book,
-                            onClick = { onOpenBook(book.id) },
+                            onClick = {
+                                coroutineScope.launch {
+                                    withContext(Dispatchers.IO) { library.fetchBook(book.id) }
+                                    books = library.books.toList()
+                                    onOpenBook(book.id)
+                                }
+                            },
                             onDelete = { deleteConfirm = book.id }
                         )
                     }

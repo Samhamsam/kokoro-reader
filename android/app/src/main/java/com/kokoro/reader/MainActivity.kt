@@ -40,6 +40,9 @@ class MainActivity : ComponentActivity() {
                     var dataDir by remember {
                         mutableStateOf(prefs.getString("data_dir", null))
                     }
+                    var serverUrl by remember {
+                        mutableStateOf(prefs.getString("server_url", "") ?: "")
+                    }
 
                     val navController = rememberNavController()
                     val startDest = if (dataDir == null) "settings" else "library"
@@ -48,9 +51,14 @@ class MainActivity : ComponentActivity() {
                         composable("settings") {
                             SettingsScreen(
                                 currentDir = dataDir ?: "",
-                                onSave = { dir ->
-                                    prefs.edit().putString("data_dir", dir).apply()
+                                currentServerUrl = serverUrl,
+                                onSave = { dir, url ->
+                                    prefs.edit()
+                                        .putString("data_dir", dir)
+                                        .putString("server_url", url)
+                                        .apply()
                                     dataDir = dir
+                                    serverUrl = url
                                     navController.navigate("library") {
                                         popUpTo("settings") { inclusive = true }
                                     }
@@ -80,6 +88,7 @@ class MainActivity : ComponentActivity() {
                             ReaderScreen(
                                 library = library,
                                 bookId = bookId,
+                                serverUrl = serverUrl,
                                 onBack = { navController.popBackStack() }
                             )
                         }

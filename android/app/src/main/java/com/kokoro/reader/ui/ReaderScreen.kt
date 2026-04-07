@@ -3,7 +3,6 @@ package com.kokoro.reader.ui
 import android.graphics.Bitmap
 import android.graphics.pdf.PdfRenderer
 import android.os.ParcelFileDescriptor
-import com.tom_roush.pdfbox.android.PDFBoxResourceLoader
 import com.tom_roush.pdfbox.pdmodel.PDDocument
 import com.tom_roush.pdfbox.text.PDFTextStripper
 import androidx.compose.foundation.Image
@@ -15,13 +14,12 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.kokoro.reader.data.Library
-import com.kokoro.reader.tts.SherpaOnnxTts
+import com.kokoro.reader.tts.ServerTtsEngine
+import com.kokoro.reader.tts.ServerVoice
 import com.kokoro.reader.tts.TtsState
-import com.kokoro.reader.tts.VoiceType
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -31,14 +29,11 @@ import java.io.File
 fun ReaderScreen(
     library: Library,
     bookId: String,
+    serverUrl: String,
     onBack: () -> Unit
 ) {
-    val book = library.books.find { it.id == bookId } ?: run {
-        onBack()
-        return
-    }
+    val book = library.books.find { it.id == bookId } ?: run { onBack(); return }
     val pdfFile = library.getBookPath(book)
-    val context = LocalContext.current
 
     var currentPage by remember { mutableIntStateOf(book.last_page) }
     var totalPages by remember { mutableIntStateOf(book.total_pages) }
@@ -46,81 +41,31 @@ fun ReaderScreen(
     var pageText by remember { mutableStateOf("") }
     var loading by remember { mutableStateOf(true) }
     var speed by remember { mutableFloatStateOf(1.0f) }
-    var selectedVoice by remember {
-        val savedId = book.selected_voice_id
-        val voice = VoiceType.entries.find { it.name == savedId } ?: VoiceType.KOKORO_HEART
-        mutableStateOf(voice)
-    }
     var voiceMenuExpanded by remember { mutableStateOf(false) }
 
-    // TTS engines
-    val modelsDir = remember { File(context.filesDir, "tts-models") }
-    val sherpaEngine = remember { SherpaOnnxTts(modelsDir) }
-    val systemEngine = remember { TtsEngine(context) }
+    // TTS via server
+    val ttsEngine = remember { ServerTtsEngine(serverUrl) }
+    var voices by remember { mutableStateOf<List<ServerVoice>>(emptyList()) }
+    var selectedVoice by remember { mutableStateOf(book.selected_voice_id.ifEmpty { "kokoro_heart" }) }
     var ttsState by remember { mutableStateOf(TtsState.IDLE) }
     var currentSentenceIdx by remember { mutableIntStateOf(0) }
-    var downloadPct by remember { mutableIntStateOf(0) }
     var readingActive by remember { mutableStateOf(false) }
+    var serverConnected by remember { mutableStateOf(false) }
 
-    // Callbacks for both engines
-    val onSherpaStateChange: () -> Unit = {
-        ttsState = sherpaEngine.state
-        currentSentenceIdx = sherpaEngine.currentSentence
-    }
-    val onSystemStateChange: () -> Unit = {
-        ttsState = systemEngine.state
-        currentSentenceIdx = systemEngine.currentSentence
+    val onStateChange: () -> Unit = {
+        ttsState = ttsEngine.state
+        currentSentenceIdx = ttsEngine.currentSentence
     }
 
-    // Helper: start TTS with the right engine
-    fun startTts(text: String) {
-        if (selectedVoice.isSystem) {
-            val locale = if (selectedVoice == VoiceType.SYSTEM_DE) java.util.Locale.GERMAN else java.util.Locale.US
-            systemEngine.setLanguage(locale)
-            systemEngine.setSpeed(speed)
-            systemEngine.speak(text, onSystemStateChange)
-        } else {
-            sherpaEngine.speak(text, selectedVoice, speed, onStateChange = onSherpaStateChange)
-        }
+    // Fetch voices from server on start
+    LaunchedEffect(serverUrl) {
+        ttsEngine.updateServerUrl(serverUrl)
+        val fetched = ttsEngine.fetchVoices()
+        voices = fetched
+        serverConnected = fetched.isNotEmpty()
     }
 
-    fun stopTts() {
-        systemEngine.stop()
-        sherpaEngine.stop()
-        ttsState = TtsState.IDLE
-    }
-
-    fun pauseTts() {
-        if (selectedVoice.isSystem) { systemEngine.pause() } else { sherpaEngine.pause() }
-        ttsState = TtsState.PAUSED
-    }
-
-    fun resumeTts() {
-        if (selectedVoice.isSystem) {
-            systemEngine.resume(onSystemStateChange)
-        } else {
-            sherpaEngine.resume(onSherpaStateChange)
-        }
-        ttsState = TtsState.PLAYING
-    }
-
-    fun getCurrentSentence(): String? {
-        return if (selectedVoice.isSystem) systemEngine.getCurrentSentenceText()
-        else sherpaEngine.getCurrentSentenceText()
-    }
-
-    // Poll download progress while generating
-    LaunchedEffect(ttsState) {
-        if (ttsState == TtsState.GENERATING) {
-            while (sherpaEngine.state == TtsState.GENERATING) {
-                downloadPct = (sherpaEngine.downloadProgress * 100).toInt()
-                kotlinx.coroutines.delay(200)
-            }
-            ttsState = sherpaEngine.state
-        }
-    }
-
-    // Auto-advance when page finished
+    // Auto-advance
     LaunchedEffect(ttsState) {
         if (ttsState == TtsState.FINISHED && readingActive) {
             if (currentPage + 1 < totalPages) {
@@ -143,7 +88,7 @@ fun ReaderScreen(
             totalPages = withContext(Dispatchers.IO) { getPageCount(pdfFile) }
         }
 
-        library.updateProgress(bookId, currentPage, 0, selectedVoice.name)
+        library.updateProgress(bookId, currentPage, 0, selectedVoice)
 
         if (readingActive && pageText.isNotBlank()) {
             ttsEngine.speak(pageText, selectedVoice, speed, onStateChange = onStateChange)
@@ -153,7 +98,7 @@ fun ReaderScreen(
     DisposableEffect(Unit) {
         onDispose {
             ttsEngine.stop()
-            library.updateProgress(bookId, currentPage, ttsEngine.currentSentence, selectedVoice.name)
+            library.updateProgress(bookId, currentPage, ttsEngine.currentSentence, selectedVoice)
         }
     }
 
@@ -164,27 +109,21 @@ fun ReaderScreen(
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         TextButton(onClick = {
                             ttsEngine.stop()
-                            library.updateProgress(bookId, currentPage, ttsEngine.currentSentence, selectedVoice.name)
+                            library.updateProgress(bookId, currentPage, ttsEngine.currentSentence, selectedVoice)
                             onBack()
                         }) { Text("< Library", color = TextPrimary) }
 
                         Spacer(Modifier.width(8.dp))
 
                         IconButton(
-                            onClick = {
-                                ttsEngine.stop(); readingActive = false
-                                if (currentPage > 0) currentPage--
-                            },
+                            onClick = { ttsEngine.stop(); readingActive = false; if (currentPage > 0) currentPage-- },
                             enabled = currentPage > 0
                         ) { Text("<", color = TextPrimary, fontSize = 18.sp) }
 
                         Text("${currentPage + 1}/$totalPages", color = TextDim, fontSize = 14.sp)
 
                         IconButton(
-                            onClick = {
-                                ttsEngine.stop(); readingActive = false
-                                if (currentPage + 1 < totalPages) currentPage++
-                            },
+                            onClick = { ttsEngine.stop(); readingActive = false; if (currentPage + 1 < totalPages) currentPage++ },
                             enabled = currentPage + 1 < totalPages
                         ) { Text(">", color = TextPrimary, fontSize = 18.sp) }
                     }
@@ -195,7 +134,11 @@ fun ReaderScreen(
         bottomBar = {
             Surface(color = Surface, tonalElevation = 4.dp) {
                 Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
-                    // TTS Controls
+                    if (!serverConnected) {
+                        Text("Server not reachable: $serverUrl", color = Red, fontSize = 12.sp)
+                        Spacer(Modifier.height(4.dp))
+                    }
+
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically,
@@ -208,31 +151,13 @@ fun ReaderScreen(
                                         readingActive = true
                                         ttsEngine.speak(pageText, selectedVoice, speed, onStateChange = onStateChange)
                                     },
-                                    enabled = pageText.isNotBlank(),
+                                    enabled = pageText.isNotBlank() && serverConnected,
                                     colors = ButtonDefaults.buttonColors(containerColor = Green)
                                 ) { Text("Play") }
                             }
                             TtsState.GENERATING -> {
-                                if (downloadPct in 1..99) {
-                                    CircularProgressIndicator(
-                                        progress = { downloadPct / 100f },
-                                        modifier = Modifier.size(24.dp),
-                                        color = Amber,
-                                        strokeWidth = 2.dp
-                                    )
-                                    Text(
-                                        "Downloading $downloadPct%",
-                                        color = Amber,
-                                        fontSize = 12.sp
-                                    )
-                                } else {
-                                    CircularProgressIndicator(
-                                        modifier = Modifier.size(24.dp),
-                                        color = Amber,
-                                        strokeWidth = 2.dp
-                                    )
-                                    Text("Loading model...", color = Amber, fontSize = 12.sp)
-                                }
+                                CircularProgressIndicator(modifier = Modifier.size(24.dp), color = Amber, strokeWidth = 2.dp)
+                                Text("Generating...", color = Amber, fontSize = 12.sp)
                             }
                             TtsState.PLAYING -> {
                                 Button(
@@ -261,65 +186,29 @@ fun ReaderScreen(
                         // Voice selector
                         Box {
                             TextButton(onClick = { voiceMenuExpanded = true }) {
-                                Text(selectedVoice.label, color = TextPrimary, fontSize = 12.sp)
+                                val voiceName = voices.find { it.id == selectedVoice }?.name ?: selectedVoice
+                                Text(voiceName, color = TextPrimary, fontSize = 12.sp)
                             }
-                            DropdownMenu(
-                                expanded = voiceMenuExpanded,
-                                onDismissRequest = { voiceMenuExpanded = false }
-                            ) {
-                                VoiceType.entries.forEach { voice ->
-                                    val downloaded = voice.isDownloaded(modelsDir)
+                            DropdownMenu(expanded = voiceMenuExpanded, onDismissRequest = { voiceMenuExpanded = false }) {
+                                voices.forEach { voice ->
                                     DropdownMenuItem(
-                                        text = {
-                                            Row(
-                                                modifier = Modifier.fillMaxWidth(),
-                                                horizontalArrangement = Arrangement.SpaceBetween
-                                            ) {
-                                                Text(voice.label)
-                                                if (!downloaded) {
-                                                    Text(
-                                                        "${voice.sizeMB} MB",
-                                                        color = TextDim,
-                                                        fontSize = 11.sp
-                                                    )
-                                                }
-                                            }
-                                        },
-                                        onClick = {
-                                            selectedVoice = voice
-                                            voiceMenuExpanded = false
-                                        },
-                                        leadingIcon = if (downloaded) {
-                                            { Text("✓", color = Green, fontSize = 14.sp) }
-                                        } else null
+                                        text = { Text(voice.name) },
+                                        onClick = { selectedVoice = voice.id; voiceMenuExpanded = false }
                                     )
                                 }
                             }
                         }
                     }
 
-                    // Speed slider
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
                         Text("Speed: ${String.format("%.1f", speed)}x", color = TextDim, fontSize = 12.sp)
-                        Slider(
-                            value = speed,
-                            onValueChange = { speed = it },
-                            valueRange = 0.5f..2.0f,
-                            steps = 5,
-                            modifier = Modifier.weight(1f)
-                        )
+                        Slider(value = speed, onValueChange = { speed = it }, valueRange = 0.5f..2.0f, steps = 5, modifier = Modifier.weight(1f))
                     }
                 }
             }
         }
     ) { padding ->
-        Box(
-            modifier = Modifier.fillMaxSize().padding(padding),
-            contentAlignment = Alignment.TopCenter
-        ) {
+        Box(modifier = Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.TopCenter) {
             if (loading) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     CircularProgressIndicator(color = Accent)
@@ -327,14 +216,8 @@ fun ReaderScreen(
             } else {
                 Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
                     bitmap?.let { bmp ->
-                        Image(
-                            bitmap = bmp.asImageBitmap(),
-                            contentDescription = "Page ${currentPage + 1}",
-                            modifier = Modifier.fillMaxWidth()
-                        )
+                        Image(bitmap = bmp.asImageBitmap(), contentDescription = "Page", modifier = Modifier.fillMaxWidth())
                     }
-
-                    // Current sentence
                     if (ttsState == TtsState.PLAYING || ttsState == TtsState.PAUSED) {
                         ttsEngine.getCurrentSentenceText()?.let { sentence ->
                             Card(
@@ -377,10 +260,7 @@ private fun renderPage(file: File, pageIndex: Int): Pair<Bitmap, String>? {
         } catch (e: Exception) { "" }
 
         Pair(bitmap, text)
-    } catch (e: Exception) {
-        e.printStackTrace()
-        null
-    }
+    } catch (e: Exception) { null }
 }
 
 private fun getPageCount(file: File): Int {

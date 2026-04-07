@@ -31,9 +31,6 @@ android {
 }
 
 dependencies {
-    // Sherpa-ONNX TTS (Kokoro + Piper)
-    implementation(files("libs/sherpa-onnx.aar"))
-
     // Compose
     implementation(platform("androidx.compose:compose-bom:2024.10.01"))
     implementation("androidx.compose.material3:material3")

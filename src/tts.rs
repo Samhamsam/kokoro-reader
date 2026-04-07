@@ -306,24 +306,27 @@ impl TtsEngine {
             let mut consecutive_failures = 0usize;
 
             loop {
-                // Use timeout so we don't hang forever if no more pages are queued
                 let job = match rx.recv_timeout(Duration::from_secs(30)) {
                     Ok(j) => j,
                     Err(mpsc::RecvTimeoutError::Timeout) => {
-                        // No new sentences for 30s — assume session is done
+                        eprintln!("[TTS] recv timeout — no more sentences after 30s");
                         break;
                     }
-                    Err(mpsc::RecvTimeoutError::Disconnected) => break, // channel closed
+                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        eprintln!("[TTS] channel disconnected (session closed)");
+                        break;
+                    }
                 };
                 if !is_current() { return; }
+
+                let preview: String = job.sentence.chars().take(40).collect();
+                eprintln!("[TTS] generating sentence {} / {}: {:?}",
+                    job.global_idx, *total_queued.lock().unwrap(), preview);
 
                 if job.global_idx < skip_sentences {
                     playback.lock().unwrap().durations.push(0.0);
                     continue;
                 }
-
-                // Page boundary is now tracked by index in PlaybackInfo,
-                // checked by check_page_boundary() based on actual playback position.
 
                 let wav_data = request_tts(&server_url, &job.sentence, &voice, speed);
 
@@ -364,7 +367,8 @@ impl TtsEngine {
                 }
             }
 
-            // If nothing was ever played, it's an error
+            eprintln!("[TTS] worker loop ended. success={} failures={}", success_count, consecutive_failures);
+
             if success_count == 0 && is_current() {
                 *state.lock().unwrap() = TtsState::Error("No audio generated".into());
                 return;

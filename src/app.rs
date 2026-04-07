@@ -281,6 +281,7 @@ impl App {
     /// Queue up to N more pages into the TTS pipeline, starting from last_queued_page + 1.
     /// Tracks what's been queued to avoid duplicates.
     fn queue_ahead(&mut self, count: usize) {
+        eprintln!("[APP] queue_ahead({}) from last_queued={}", count, self.last_queued_page);
         if let Some(ref pdf) = self.pdf {
             let total = pdf.page_count();
             let mut queued = 0;

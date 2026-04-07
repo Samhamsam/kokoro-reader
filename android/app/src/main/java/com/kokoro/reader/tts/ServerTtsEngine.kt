@@ -71,6 +71,7 @@ class ServerTtsEngine(private var serverUrl: String) {
         val myGen = generationId.incrementAndGet()
         speakJob?.cancel()
         paused = false
+        currentSpeed = speed
 
         val splitSentences = TtsEngine.splitIntoSentences(text)
         android.util.Log.i("KokoroTTS", "speak() sentences=${splitSentences.size}")
@@ -117,7 +118,7 @@ class ServerTtsEngine(private var serverUrl: String) {
                     if (job.isEnd) break
                     if (job.globalIdx < skipSentences) continue
 
-                    val wavData = requestTts(job.sentence, voiceId, speed)
+                    val wavData = requestTts(job.sentence, voiceId, currentSpeed)
                     if (!isCurrent()) break
 
                     if (wavData == null) {
@@ -266,6 +267,9 @@ class ServerTtsEngine(private var serverUrl: String) {
         } catch (e: Exception) { null }
     }
 
+    @Volatile var currentSpeed: Float = 1.0f
+
+    fun setSpeed(speed: Float) { currentSpeed = speed }
     fun pause() { paused = true; state = TtsState.PAUSED }
     fun resume(onStateChange: () -> Unit) { paused = false; state = TtsState.PLAYING }
     fun stop() { generationId.incrementAndGet(); paused = false; speakJob?.cancel(); sentenceQueue = null; state = TtsState.IDLE }

@@ -288,7 +288,7 @@ fun ReaderScreen(
 
                     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
                         Text("Speed: ${String.format("%.1f", speed)}x", color = TextDim, fontSize = 12.sp)
-                        Slider(value = speed, onValueChange = { speed = it }, valueRange = 0.5f..2.0f, steps = 5, modifier = Modifier.weight(1f))
+                        Slider(value = speed, onValueChange = { speed = it; ttsEngine.setSpeed(it) }, valueRange = 0.5f..2.0f, steps = 5, modifier = Modifier.weight(1f))
                     }
                 }
             }

@@ -61,6 +61,12 @@ pub struct App {
     resume_sentence: usize,
     settings: crate::library::Settings,
     settings_server_input: String,
+    // Summary
+    summary_open: bool,
+    summary_text: String,
+    summary_loading: bool,
+    summary_lang: String,
+    summary_rx: Option<mpsc::Receiver<Result<String, String>>>,
 }
 
 impl App {
@@ -121,6 +127,11 @@ impl App {
             resume_sentence: 0,
             settings: settings.clone(),
             settings_server_input: settings.server_url.clone(),
+            summary_open: false,
+            summary_text: String::new(),
+            summary_loading: false,
+            summary_lang: "de".to_string(),
+            summary_rx: None,
         };
 
         // If launched with a PDF argument, import and open it
@@ -175,6 +186,43 @@ impl App {
         self.pdf = None;
         self.page_texture = None;
         self.mode = AppMode::Library;
+    }
+
+    fn request_summary(&mut self) {
+        let book_id = match &self.mode {
+            AppMode::Reader { book_id } => book_id.clone(),
+            _ => return,
+        };
+        let server_url = self.settings.server_url.clone();
+        let lang = self.summary_lang.clone();
+        let (tx, rx) = mpsc::channel();
+        self.summary_loading = true;
+        self.summary_rx = Some(rx);
+        std::thread::spawn(move || {
+            let url = format!("{}/api/books/{}/summary?lang={}", server_url, book_id, lang);
+            let result = reqwest::blocking::Client::new()
+                .post(&url)
+                .timeout(std::time::Duration::from_secs(300))
+                .send()
+                .and_then(|r| r.text())
+                .map_err(|e| format!("{}", e))
+                .and_then(|text| {
+                    serde_json::from_str::<serde_json::Value>(&text)
+                        .map_err(|e| format!("{}", e))
+                        .and_then(|v| {
+                            v.get("summary")
+                                .and_then(|s| s.as_str())
+                                .map(|s| s.to_string())
+                                .ok_or_else(|| {
+                                    v.get("error")
+                                        .and_then(|e| e.as_str())
+                                        .unwrap_or(&text)
+                                        .to_string()
+                                })
+                        })
+                });
+            let _ = tx.send(result);
+        });
     }
 
     fn sync_before_play(&mut self, book_id: &str, ctx: &egui::Context) {
@@ -611,10 +659,67 @@ impl App {
                     }
                 }
                 RenderResult::Error(e) => {
-                    self.status_msg = format!("Error: {}", e);
+                    self.status_msg = format!("Error: {e}");
                     self.loading = false;
                 }
             }
+        }
+
+        // Check summary result
+        if let Some(ref rx) = self.summary_rx {
+            if let Ok(result) = rx.try_recv() {
+                match result {
+                    Ok(text) => {
+                        self.summary_text = text;
+                        self.summary_open = true;
+                    }
+                    Err(e) => {
+                        self.status_msg = format!("Summary error: {e}");
+                    }
+                }
+                self.summary_loading = false;
+                self.summary_rx = None;
+            } else if self.summary_loading {
+                ctx.request_repaint();
+            }
+        }
+
+        // Summary window
+        if self.summary_open {
+            let mut open = self.summary_open;
+            egui::Window::new("Summary")
+                .open(&mut open)
+                .default_width(600.0)
+                .default_height(500.0)
+                .resizable(true)
+                .scroll([false, true])
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Language:").color(TEXT_DIM));
+                        for (code, label) in [("de", "DE"), ("en", "EN"), ("fr", "FR"), ("es", "ES")] {
+                            if ui.selectable_label(self.summary_lang == code, label).clicked() {
+                                self.summary_lang = code.to_string();
+                            }
+                        }
+                        ui.add_space(12.0);
+                        if ui.add(egui::Button::new(
+                            RichText::new("Regenerate").color(Color32::WHITE).strong()
+                        ).fill(ACCENT).corner_radius(egui::CornerRadius::same(6))).clicked() {
+                            self.summary_text.clear();
+                            self.request_summary();
+                        }
+                    });
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.add_space(8.0);
+                    if self.summary_loading {
+                        ui.spinner();
+                        ui.label(RichText::new("Generating summary...").color(AMBER));
+                    } else {
+                        ui.label(RichText::new(&self.summary_text).color(TEXT_PRIMARY));
+                    }
+                });
+            self.summary_open = open;
         }
 
         // Page boundary: TTS worker crossed into next page's sentences.
@@ -886,6 +991,29 @@ impl App {
 
                                 self.pending_speed_restart = false;
                                 self.pending_speed_save = false;
+                            }
+
+                            ui.add_space(12.0);
+                            ui.separator();
+                            ui.add_space(8.0);
+
+                            // Summary button
+                            let summary_label = if self.summary_loading {
+                                "Summarizing..."
+                            } else {
+                                "Summary"
+                            };
+                            let btn = egui::Button::new(
+                                RichText::new(summary_label).color(Color32::WHITE).strong(),
+                            )
+                            .fill(ACCENT)
+                            .corner_radius(egui::CornerRadius::same(6));
+                            if ui.add_enabled(!self.summary_loading, btn).clicked() {
+                                if !self.summary_text.is_empty() {
+                                    self.summary_open = true;
+                                } else {
+                                    self.request_summary();
+                                }
                             }
                         },
                     );

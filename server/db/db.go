@@ -80,6 +80,19 @@ func (d *DB) migrate() error {
 	d.db.Exec(`ALTER TABLE books ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0`)
 	d.db.Exec(`UPDATE books SET updated_at = created_at WHERE updated_at = 0`)
 	d.db.Exec(`UPDATE books SET version = 1 WHERE version <= 0`)
+
+	_, err2 := d.db.Exec(`
+		CREATE TABLE IF NOT EXISTS summaries (
+			book_id TEXT NOT NULL,
+			lang TEXT NOT NULL,
+			summary TEXT NOT NULL,
+			created_at INTEGER NOT NULL,
+			PRIMARY KEY (book_id, lang),
+			FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
+		)
+	`)
+	if err2 != nil { return err2 }
+
 	return err
 }
 
@@ -177,6 +190,26 @@ func IsConflict(err error) (*ConflictError, bool) {
 
 func (d *DB) DeleteBook(id string) error {
 	_, err := d.db.Exec(`DELETE FROM books WHERE id = ?`, id)
+	return err
+}
+
+// GetSummary returns a cached summary or nil if not found
+func (d *DB) GetSummary(bookID, lang string) (string, bool) {
+	var summary string
+	err := d.db.QueryRow(`SELECT summary FROM summaries WHERE book_id = ? AND lang = ?`, bookID, lang).Scan(&summary)
+	if err != nil {
+		return "", false
+	}
+	return summary, true
+}
+
+// SaveSummary stores a summary for a book and language
+func (d *DB) SaveSummary(bookID, lang, summary string) error {
+	_, err := d.db.Exec(`
+		INSERT INTO summaries (book_id, lang, summary, created_at)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT (book_id, lang) DO UPDATE SET summary = ?, created_at = ?
+	`, bookID, lang, summary, time.Now().Unix(), summary, time.Now().Unix())
 	return err
 }
 

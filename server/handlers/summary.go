@@ -55,6 +55,17 @@ func (h *SummaryHandler) Summarize(w http.ResponseWriter, r *http.Request, id st
 		return
 	}
 
+	// Check cache first
+	regenerate := r.URL.Query().Get("regenerate") == "true"
+	if !regenerate {
+		if cached, ok := h.DB.GetSummary(id, lang); ok {
+			log.Printf("Summary: serving cached for '%s' (%s)", book.Title, lang)
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(summaryResponse{Summary: cached, Lang: lang})
+			return
+		}
+	}
+
 	// Extract text from PDF
 	log.Printf("Summary: extracting text from %s (%d pages)", book.Title, book.TotalPages)
 	text, err := extractPDFText(pdfPath)
@@ -75,6 +86,11 @@ func (h *SummaryHandler) Summarize(w http.ResponseWriter, r *http.Request, id st
 		log.Printf("Summary error: %v", err)
 		http.Error(w, fmt.Sprintf("summary generation failed: %v", err), http.StatusInternalServerError)
 		return
+	}
+
+	// Save to cache
+	if err := h.DB.SaveSummary(id, lang, summary); err != nil {
+		log.Printf("Summary: cache save error: %v", err)
 	}
 
 	log.Printf("Summary: done for '%s' (%d chars)", book.Title, len(summary))

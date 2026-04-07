@@ -11,6 +11,9 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
@@ -20,8 +23,6 @@ import com.kokoro.reader.data.Library
 import com.kokoro.reader.tts.ServerTtsEngine
 import com.kokoro.reader.tts.ServerVoice
 import com.kokoro.reader.tts.TtsState
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 import java.io.File
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -67,6 +68,20 @@ fun ReaderScreen(
     }
 
     var lastQueuedPage by remember { mutableIntStateOf(currentPage) }
+    val coroutineScope = rememberCoroutineScope()
+
+    // Helper: extract text from a page (IO thread)
+    fun extractPageText(file: File, pageIdx: Int): String {
+        return try {
+            val doc = com.tom_roush.pdfbox.pdmodel.PDDocument.load(file)
+            val stripper = com.tom_roush.pdfbox.text.PDFTextStripper()
+            stripper.startPage = pageIdx + 1
+            stripper.endPage = pageIdx + 1
+            val t = stripper.getText(doc).trim()
+            doc.close()
+            t
+        } catch (_: Exception) { "" }
+    }
 
     // Poll TTS state and handle page boundaries
     LaunchedEffect(readingActive) {
@@ -101,29 +116,15 @@ fun ReaderScreen(
                         pageText = result?.second ?: ""
                     }
                     withContext(Dispatchers.IO) { library.updateProgress(bookId, currentPage, 0, selectedVoice) }
-                    // Queue one more page ahead
+                    // Queue one more page ahead (IO thread)
                     if (lastQueuedPage + 1 < totalPages) {
                         lastQueuedPage++
                         val file2 = pdfFile
                         if (file2 != null) {
-                            val nextText = withContext(Dispatchers.IO) {
-                                try {
-                                    val doc = com.tom_roush.pdfbox.pdmodel.PDDocument.load(file2)
-                                    val stripper = com.tom_roush.pdfbox.text.PDFTextStripper()
-                                    stripper.startPage = lastQueuedPage + 1
-                                    stripper.endPage = lastQueuedPage + 1
-                                    val t = stripper.getText(doc).trim()
-                                    doc.close()
-                                    t
-                                } catch (_: Exception) { "" }
-                            }
-                            if (nextText.isNotBlank()) {
-                                ttsEngine.appendPage(nextText)
-                            }
+                            val nextText = withContext(Dispatchers.IO) { extractPageText(file2, lastQueuedPage) }
+                            if (nextText.isNotBlank()) ttsEngine.appendPage(nextText)
                         }
-                        if (lastQueuedPage + 1 >= totalPages) {
-                            ttsEngine.finishSession()
-                        }
+                        if (lastQueuedPage + 1 >= totalPages) ttsEngine.finishSession()
                     }
                 }
             }
@@ -216,26 +217,21 @@ fun ReaderScreen(
                                     onClick = {
                                         lastQueuedPage = currentPage
                                         ttsEngine.speak(pageText, selectedVoice, speed)
-                                        // Queue next 2 pages ahead
-                                        val file = pdfFile
-                                        if (file != null) {
-                                            for (n in 1..2) {
-                                                if (lastQueuedPage + 1 < totalPages) {
-                                                    lastQueuedPage++
-                                                    try {
-                                                        val doc = com.tom_roush.pdfbox.pdmodel.PDDocument.load(file)
-                                                        val stripper = com.tom_roush.pdfbox.text.PDFTextStripper()
-                                                        stripper.startPage = lastQueuedPage + 1
-                                                        stripper.endPage = lastQueuedPage + 1
-                                                        val t = stripper.getText(doc).trim()
-                                                        doc.close()
-                                                        if (t.isNotBlank()) ttsEngine.appendPage(t)
-                                                    } catch (_: Exception) {}
-                                                }
-                                            }
-                                            if (lastQueuedPage + 1 >= totalPages) ttsEngine.finishSession()
-                                        }
                                         readingActive = true
+                                        // Queue next 2 pages on IO thread
+                                        coroutineScope.launch {
+                                            val file = pdfFile ?: return@launch
+                                            withContext(Dispatchers.IO) {
+                                                for (n in 1..2) {
+                                                    if (lastQueuedPage + 1 < totalPages) {
+                                                        lastQueuedPage++
+                                                        val t = extractPageText(file, lastQueuedPage)
+                                                        if (t.isNotBlank()) ttsEngine.appendPage(t)
+                                                    }
+                                                }
+                                                if (lastQueuedPage + 1 >= totalPages) ttsEngine.finishSession()
+                                            }
+                                        }
                                     },
                                     enabled = pageText.isNotBlank() && serverConnected,
                                     colors = ButtonDefaults.buttonColors(containerColor = Green)

@@ -66,24 +66,20 @@ fun ReaderScreen(
         }
     }
 
-    // Poll TTS state every 200ms — simple and no recomposition loops
+    var lastQueuedPage by remember { mutableIntStateOf(currentPage) }
+
+    // Poll TTS state and handle page boundaries
     LaunchedEffect(readingActive) {
         if (!readingActive) return@LaunchedEffect
 
-        // Wait for TTS to actually start before polling
-        // (avoid treating initial IDLE/FINISHED as "done")
         var waitingForStart = true
 
         while (readingActive) {
             val newState = ttsEngine.state
             val newSentence = ttsEngine.currentSentence
 
-            // Once we see PLAYING or GENERATING, we know TTS has started
             if (waitingForStart) {
-                if (newState == TtsState.PLAYING || newState == TtsState.GENERATING) {
-                    waitingForStart = false
-                }
-                // Don't process FINISHED while waiting for start
+                if (newState == TtsState.PLAYING) waitingForStart = false
                 ttsState = newState
                 currentSentenceIdx = newSentence
                 kotlinx.coroutines.delay(100)
@@ -93,25 +89,48 @@ fun ReaderScreen(
             if (newState != ttsState) ttsState = newState
             if (newSentence != currentSentenceIdx) currentSentenceIdx = newSentence
 
-            // Auto-advance when finished
-            if (newState == TtsState.FINISHED) {
+            // Page boundary: audio reached the next page's first sentence
+            if (ttsEngine.checkPageBoundary()) {
                 if (currentPage + 1 < totalPages) {
                     currentPage++
-                    kotlinx.coroutines.delay(300)
-                    loading = true
-                    val file = pdfFile ?: continue
-                    val result = withContext(Dispatchers.IO) { renderPage(file, currentPage) }
-                    bitmap = result?.first
-                    pageText = result?.second ?: ""
-                    loading = false
-                    withContext(Dispatchers.IO) { library.updateProgress(bookId, currentPage, 0, selectedVoice) }
-                    if (pageText.isNotBlank()) {
-                        waitingForStart = true // reset for next page
-                        ttsEngine.speak(pageText, selectedVoice, speed, onStateChange = noopCallback)
+                    // Render new page visually (async, doesn't block audio)
+                    val file = pdfFile
+                    if (file != null) {
+                        val result = withContext(Dispatchers.IO) { renderPage(file, currentPage) }
+                        bitmap = result?.first
+                        pageText = result?.second ?: ""
                     }
-                } else {
-                    readingActive = false
+                    withContext(Dispatchers.IO) { library.updateProgress(bookId, currentPage, 0, selectedVoice) }
+                    // Queue one more page ahead
+                    if (lastQueuedPage + 1 < totalPages) {
+                        lastQueuedPage++
+                        val file2 = pdfFile
+                        if (file2 != null) {
+                            val nextText = withContext(Dispatchers.IO) {
+                                try {
+                                    val doc = com.tom_roush.pdfbox.pdmodel.PDDocument.load(file2)
+                                    val stripper = com.tom_roush.pdfbox.text.PDFTextStripper()
+                                    stripper.startPage = lastQueuedPage + 1
+                                    stripper.endPage = lastQueuedPage + 1
+                                    val t = stripper.getText(doc).trim()
+                                    doc.close()
+                                    t
+                                } catch (_: Exception) { "" }
+                            }
+                            if (nextText.isNotBlank()) {
+                                ttsEngine.appendPage(nextText)
+                            }
+                        }
+                        if (lastQueuedPage + 1 >= totalPages) {
+                            ttsEngine.finishSession()
+                        }
+                    }
                 }
+            }
+
+            // Session fully finished (all pages done)
+            if (newState == TtsState.FINISHED || newState == TtsState.ERROR) {
+                readingActive = false
             }
 
             kotlinx.coroutines.delay(200)
@@ -195,8 +214,28 @@ fun ReaderScreen(
                             TtsState.IDLE, TtsState.FINISHED, TtsState.ERROR -> {
                                 Button(
                                     onClick = {
-                                        ttsEngine.speak(pageText, selectedVoice, speed, onStateChange = noopCallback)
-                                        readingActive = true // set AFTER speak so polling doesn't see FINISHED
+                                        lastQueuedPage = currentPage
+                                        ttsEngine.speak(pageText, selectedVoice, speed)
+                                        // Queue next 2 pages ahead
+                                        val file = pdfFile
+                                        if (file != null) {
+                                            for (n in 1..2) {
+                                                if (lastQueuedPage + 1 < totalPages) {
+                                                    lastQueuedPage++
+                                                    try {
+                                                        val doc = com.tom_roush.pdfbox.pdmodel.PDDocument.load(file)
+                                                        val stripper = com.tom_roush.pdfbox.text.PDFTextStripper()
+                                                        stripper.startPage = lastQueuedPage + 1
+                                                        stripper.endPage = lastQueuedPage + 1
+                                                        val t = stripper.getText(doc).trim()
+                                                        doc.close()
+                                                        if (t.isNotBlank()) ttsEngine.appendPage(t)
+                                                    } catch (_: Exception) {}
+                                                }
+                                            }
+                                            if (lastQueuedPage + 1 >= totalPages) ttsEngine.finishSession()
+                                        }
+                                        readingActive = true
                                     },
                                     enabled = pageText.isNotBlank() && serverConnected,
                                     colors = ButtonDefaults.buttonColors(containerColor = Green)

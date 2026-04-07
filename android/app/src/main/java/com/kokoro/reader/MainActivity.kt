@@ -39,6 +39,11 @@ class MainActivity : ComponentActivity() {
                     val navController = rememberNavController()
                     val startDest = if (serverUrl == null) "settings" else "library"
 
+                    // Single shared Library instance
+                    val library = remember(serverUrl) {
+                        serverUrl?.let { Library(it, cacheDir) }
+                    }
+
                     NavHost(navController, startDestination = startDest) {
                         composable("settings") {
                             SettingsScreen(
@@ -54,10 +59,9 @@ class MainActivity : ComponentActivity() {
                         }
 
                         composable("library") {
-                            val url = serverUrl ?: return@composable
-                            val library = remember(url) { Library(url, cacheDir) }
+                            val lib = library ?: return@composable
                             LibraryScreen(
-                                library = library,
+                                library = lib,
                                 onOpenBook = { bookId ->
                                     navController.navigate("reader/$bookId")
                                 },
@@ -68,10 +72,10 @@ class MainActivity : ComponentActivity() {
 
                         composable("reader/{bookId}") { backStackEntry ->
                             val bookId = backStackEntry.arguments?.getString("bookId") ?: return@composable
+                            val lib = library ?: return@composable
                             val url = serverUrl ?: return@composable
-                            val library = remember(url) { Library(url, cacheDir) }
                             ReaderScreen(
-                                library = library,
+                                library = lib,
                                 bookId = bookId,
                                 serverUrl = url,
                                 onBack = { navController.popBackStack() }

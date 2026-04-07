@@ -10,10 +10,15 @@ import java.io.ByteArrayOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 
 data class ServerVoice(val id: String, val name: String, val lang: String)
 
+/**
+ * Continuous TTS session: speak() starts, appendPage() feeds more pages,
+ * finishSession() signals end. Audio plays across pages without interruption.
+ */
 class ServerTtsEngine(private var serverUrl: String) {
     var state: TtsState = TtsState.IDLE
         private set
@@ -22,11 +27,19 @@ class ServerTtsEngine(private var serverUrl: String) {
     var totalSentences: Int = 0
         private set
 
-    private var sentences: List<String> = emptyList()
-    private val generationId = AtomicLong(0) // incremented on each speak()
+    private var sentences: MutableList<String> = mutableListOf()
+    private val generationId = AtomicLong(0)
     @Volatile private var paused = false
     private var speakJob: Job? = null
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+
+    // Sentence queue for the worker — END_MARKER signals session end
+    data class SentenceJob(val sentence: String, val globalIdx: Int, val isPageBoundary: Boolean, val isEnd: Boolean = false)
+    private var sentenceQueue: LinkedBlockingQueue<SentenceJob>? = null
+
+    // Page boundary tracking (playback-based)
+    private val pageBoundaryIndices = mutableListOf<Int>()
+    private var boundariesSignaled = 0
 
     var availableVoices: List<ServerVoice> = emptyList()
         private set
@@ -49,40 +62,67 @@ class ServerTtsEngine(private var serverUrl: String) {
         } catch (e: Exception) { emptyList() }
     }
 
-    fun speak(text: String, voiceId: String, speed: Float, skipSentences: Int = 0, onStateChange: () -> Unit) {
-        // New generation — invalidates any old running job
+    /**
+     * Start a new continuous playback session.
+     * Call appendPage() to add more pages, finishSession() when book ends.
+     */
+    fun speak(text: String, voiceId: String, speed: Float, skipSentences: Int = 0) {
         val myGen = generationId.incrementAndGet()
         speakJob?.cancel()
         paused = false
-        state = TtsState.PLAYING
 
         val splitSentences = TtsEngine.splitIntoSentences(text)
         if (splitSentences.isEmpty()) { state = TtsState.FINISHED; return }
 
-        sentences = splitSentences
+        sentences = splitSentences.toMutableList()
         totalSentences = sentences.size
         currentSentence = skipSentences
+        pageBoundaryIndices.clear()
+        boundariesSignaled = 0
 
-        data class AudioChunk(val idx: Int, val samples: ShortArray, val sampleRate: Int)
-        val pcmQueue = LinkedBlockingQueue<AudioChunk?>(5)
+        val queue = LinkedBlockingQueue<SentenceJob>(20)
+        sentenceQueue = queue
+
+        // Queue first page's sentences
+        for ((i, s) in splitSentences.withIndex()) {
+            queue.put(SentenceJob(s, i, isPageBoundary = false))
+        }
+
+        state = TtsState.PLAYING
 
         fun isCurrent() = generationId.get() == myGen
 
         speakJob = scope.launch {
-            val producer = launch(Dispatchers.IO) {
-                var consecutiveFailures = 0
-                var successCount = 0
-                for ((i, sentence) in sentences.withIndex()) {
-                    if (i < skipSentences) continue
-                    if (!isCurrent()) return@launch
+            // Producer: pulls from queue, fetches audio from server
+            data class AudioChunk(val idx: Int, val samples: ShortArray, val sampleRate: Int)
+            val audioQueue = LinkedBlockingQueue<AudioChunk>(5)
+            var producerDone = false
 
-                    val wavData = requestTts(sentence, voiceId, speed)
-                    if (!isCurrent()) return@launch
+            val producer = launch(Dispatchers.IO) {
+                var successCount = 0
+                var consecutiveFailures = 0
+
+                while (isCurrent()) {
+                    val job = try {
+                        queue.poll(500, TimeUnit.MILLISECONDS)
+                    } catch (_: InterruptedException) { null }
+
+                    if (job == null) {
+                        // Check if session was ended
+                        if (!isCurrent()) break
+                        continue
+                    }
+                    if (job.isEnd) break
+                    if (job.globalIdx < skipSentences) continue
+
+                    val wavData = requestTts(job.sentence, voiceId, speed)
+                    if (!isCurrent()) break
+
                     if (wavData == null) {
                         consecutiveFailures++
                         if (consecutiveFailures >= 3) {
                             state = TtsState.ERROR
-                            return@launch
+                            break
                         }
                         continue
                     }
@@ -90,16 +130,17 @@ class ServerTtsEngine(private var serverUrl: String) {
                     successCount++
 
                     val parsed = wavToSamples(wavData) ?: continue
-                    pcmQueue.put(AudioChunk(i, parsed.first, parsed.second))
+                    audioQueue.put(AudioChunk(job.globalIdx, parsed.first, parsed.second))
                 }
-                // If nothing succeeded, mark as error
-                if (successCount == 0 && isCurrent()) {
+
+                if (successCount == 0 && isCurrent() && state != TtsState.ERROR) {
                     state = TtsState.ERROR
                 }
-                pcmQueue.put(null)
+                producerDone = true
             }
 
-            val consumerJob = launch(Dispatchers.IO) {
+            // Consumer: plays audio continuously
+            val consumer = launch(Dispatchers.IO) {
                 var currentRate = 0
                 var track: AudioTrack? = null
 
@@ -127,9 +168,9 @@ class ServerTtsEngine(private var serverUrl: String) {
                 }
 
                 while (isCurrent()) {
-                    val chunk = pcmQueue.poll(100, java.util.concurrent.TimeUnit.MILLISECONDS)
+                    val chunk = audioQueue.poll(200, TimeUnit.MILLISECONDS)
                     if (chunk == null) {
-                        if (pcmQueue.isEmpty() && !producer.isActive) break
+                        if (producerDone && audioQueue.isEmpty()) break
                         continue
                     }
 
@@ -147,16 +188,49 @@ class ServerTtsEngine(private var serverUrl: String) {
                 track?.stop(); track?.release()
             }
 
-            // Wait for both producer AND consumer to finish
             producer.join()
-            consumerJob.join()
-            if (isCurrent()) {
-                // If producer ended with ERROR (server down), keep that state
-                if (state != TtsState.ERROR) {
-                    state = TtsState.FINISHED
-                }
+            consumer.join()
+
+            if (isCurrent() && state != TtsState.ERROR) {
+                state = TtsState.FINISHED
             }
         }
+    }
+
+    /** Append another page to the running session. Audio continues without interruption. */
+    fun appendPage(text: String) {
+        val newSentences = TtsEngine.splitIntoSentences(text)
+        if (newSentences.isEmpty()) return
+
+        val offset = sentences.size
+        sentences.addAll(newSentences)
+        totalSentences = sentences.size
+
+        // Record page boundary
+        pageBoundaryIndices.add(offset)
+
+        val queue = sentenceQueue ?: return
+        for ((i, s) in newSentences.withIndex()) {
+            queue.put(SentenceJob(s, offset + i, isPageBoundary = i == 0))
+        }
+    }
+
+    /** Signal that no more pages are coming. Worker will finish after current queue. */
+    fun finishSession() {
+        sentenceQueue?.put(SentenceJob("", -1, false, isEnd = true))
+    }
+
+    /** Check if playback has crossed a page boundary (based on currentSentence, not generation). */
+    fun checkPageBoundary(): Boolean {
+        while (boundariesSignaled < pageBoundaryIndices.size) {
+            val boundary = pageBoundaryIndices[boundariesSignaled]
+            if (currentSentence >= boundary) {
+                boundariesSignaled++
+                return true
+            }
+            break
+        }
+        return false
     }
 
     private fun wavToSamples(wavData: ByteArray): Pair<ShortArray, Int>? {
@@ -192,7 +266,7 @@ class ServerTtsEngine(private var serverUrl: String) {
 
     fun pause() { paused = true; state = TtsState.PAUSED }
     fun resume(onStateChange: () -> Unit) { paused = false; state = TtsState.PLAYING }
-    fun stop() { generationId.incrementAndGet(); paused = false; speakJob?.cancel(); state = TtsState.IDLE }
+    fun stop() { generationId.incrementAndGet(); paused = false; speakJob?.cancel(); sentenceQueue = null; state = TtsState.IDLE }
     fun getCurrentSentenceText(): String? = sentences.getOrNull(currentSentence)
     fun release() { stop(); scope.cancel() }
 }

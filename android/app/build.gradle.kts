@@ -39,8 +39,8 @@ dependencies {
     implementation("androidx.activity:activity-compose:1.9.3")
     implementation("androidx.navigation:navigation-compose:2.8.4")
 
-    // ONNX Runtime for TTS
-    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.19.2")
+    // PDF text extraction
+    implementation("com.tom-roush:pdfbox-android:2.0.27.0")
 
     // JSON
     implementation("com.google.code.gson:gson:2.11.0")

@@ -2,6 +2,7 @@ package com.kokoro.reader
 
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import com.tom_roush.pdfbox.android.PDFBoxResourceLoader
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
@@ -21,6 +22,7 @@ import java.io.File
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        PDFBoxResourceLoader.init(applicationContext)
 
         setContent {
             KokoroTheme {

@@ -3,7 +3,7 @@ name: Rust Desktop
 on:
   push:
     branches: [main]
-    paths: [src/**, Cargo.toml, Cargo.lock]
+    paths: [desktop/**]
   workflow_dispatch:
 
 jobs:
@@ -20,27 +20,28 @@ jobs:
 
       - name: Download pdfium
         run: |
-          mkdir -p lib/lib
-          curl -L -o /tmp/pdfium.tgz https://github.com/nicehash/pdfium-binaries/releases/latest/download/pdfium-linux-x64.tgz \
-            || curl -L -o /tmp/pdfium.tgz https://github.com/bblanchon/pdfium-binaries/releases/latest/download/pdfium-linux-x64.tgz
+          mkdir -p desktop/lib/lib
+          curl -L -o /tmp/pdfium.tgz https://github.com/bblanchon/pdfium-binaries/releases/latest/download/pdfium-linux-x64.tgz
           mkdir -p /tmp/pdfium-extract
           tar -xzf /tmp/pdfium.tgz -C /tmp/pdfium-extract
-          cp /tmp/pdfium-extract/lib/libpdfium.so lib/lib/libpdfium.so
-          ls -la lib/lib/
+          cp /tmp/pdfium-extract/lib/libpdfium.so desktop/lib/lib/libpdfium.so
 
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop
 
       - name: Build release
+        working-directory: desktop
         run: cargo build --release
 
       - name: Package
         run: |
           mkdir -p dist
-          cp target/release/kokoro-reader dist/
-          cp assets/icon.png dist/kokoro-reader.png
-          cp kokoro-reader.desktop dist/
+          cp desktop/target/release/kokoro-reader dist/
+          cp desktop/assets/icon.png dist/kokoro-reader.png
+          cp desktop/kokoro-reader.desktop dist/
           tar -czf kokoro-reader-linux-x64.tar.gz -C dist .
 
       - uses: actions/upload-artifact@v4

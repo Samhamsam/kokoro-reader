@@ -1,5 +1,5 @@
-/target
-/lib
+desktop/target
+desktop/lib
 *.wav
 *.mp3
 .venv/

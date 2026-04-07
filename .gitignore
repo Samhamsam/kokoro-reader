@@ -7,3 +7,5 @@ android/app/build/
 android/.gradle/
 android/build/
 *.apk
+server/kokoro-server
+server/models/

@@ -53,15 +53,71 @@ fun ReaderScreen(
     }
     var voiceMenuExpanded by remember { mutableStateOf(false) }
 
-    // TTS — use app's internal storage for model cache
+    // TTS engines
     val modelsDir = remember { File(context.filesDir, "tts-models") }
-    val ttsEngine = remember { SherpaOnnxTts(modelsDir) }
+    val sherpaEngine = remember { SherpaOnnxTts(modelsDir) }
+    val systemEngine = remember { TtsEngine(context) }
     var ttsState by remember { mutableStateOf(TtsState.IDLE) }
     var currentSentenceIdx by remember { mutableIntStateOf(0) }
+    var downloadPct by remember { mutableIntStateOf(0) }
     var readingActive by remember { mutableStateOf(false) }
-    val onStateChange: () -> Unit = {
-        ttsState = ttsEngine.state
-        currentSentenceIdx = ttsEngine.currentSentence
+
+    // Callbacks for both engines
+    val onSherpaStateChange: () -> Unit = {
+        ttsState = sherpaEngine.state
+        currentSentenceIdx = sherpaEngine.currentSentence
+    }
+    val onSystemStateChange: () -> Unit = {
+        ttsState = systemEngine.state
+        currentSentenceIdx = systemEngine.currentSentence
+    }
+
+    // Helper: start TTS with the right engine
+    fun startTts(text: String) {
+        if (selectedVoice.isSystem) {
+            val locale = if (selectedVoice == VoiceType.SYSTEM_DE) java.util.Locale.GERMAN else java.util.Locale.US
+            systemEngine.setLanguage(locale)
+            systemEngine.setSpeed(speed)
+            systemEngine.speak(text, onSystemStateChange)
+        } else {
+            sherpaEngine.speak(text, selectedVoice, speed, onStateChange = onSherpaStateChange)
+        }
+    }
+
+    fun stopTts() {
+        systemEngine.stop()
+        sherpaEngine.stop()
+        ttsState = TtsState.IDLE
+    }
+
+    fun pauseTts() {
+        if (selectedVoice.isSystem) { systemEngine.pause() } else { sherpaEngine.pause() }
+        ttsState = TtsState.PAUSED
+    }
+
+    fun resumeTts() {
+        if (selectedVoice.isSystem) {
+            systemEngine.resume(onSystemStateChange)
+        } else {
+            sherpaEngine.resume(onSherpaStateChange)
+        }
+        ttsState = TtsState.PLAYING
+    }
+
+    fun getCurrentSentence(): String? {
+        return if (selectedVoice.isSystem) systemEngine.getCurrentSentenceText()
+        else sherpaEngine.getCurrentSentenceText()
+    }
+
+    // Poll download progress while generating
+    LaunchedEffect(ttsState) {
+        if (ttsState == TtsState.GENERATING) {
+            while (sherpaEngine.state == TtsState.GENERATING) {
+                downloadPct = (sherpaEngine.downloadProgress * 100).toInt()
+                kotlinx.coroutines.delay(200)
+            }
+            ttsState = sherpaEngine.state
+        }
     }
 
     // Auto-advance when page finished
@@ -157,16 +213,15 @@ fun ReaderScreen(
                                 ) { Text("Play") }
                             }
                             TtsState.GENERATING -> {
-                                val progress = ttsEngine.downloadProgress
-                                if (progress > 0f && progress < 1f) {
+                                if (downloadPct in 1..99) {
                                     CircularProgressIndicator(
-                                        progress = { progress },
+                                        progress = { downloadPct / 100f },
                                         modifier = Modifier.size(24.dp),
                                         color = Amber,
                                         strokeWidth = 2.dp
                                     )
                                     Text(
-                                        "Downloading ${(progress * 100).toInt()}%",
+                                        "Downloading $downloadPct%",
                                         color = Amber,
                                         fontSize = 12.sp
                                     )

@@ -8,7 +8,7 @@ import kotlinx.coroutines.*
 import java.io.File
 import java.net.URL
 
-enum class ModelType { KOKORO, PIPER }
+enum class ModelType { SYSTEM, KOKORO, PIPER }
 
 enum class VoiceType(
     val label: String,
@@ -16,32 +16,28 @@ enum class VoiceType(
     val modelDir: String,
     val sizeMB: Int,
     val type: ModelType,
-    val modelFile: String, // onnx filename inside modelDir
+    val modelFile: String = "",
     val speakerId: Int = 0,
 ) {
-    // Kokoro English voices (all share the same model, different speaker IDs)
-    KOKORO_HEART("EN Heart (F)", "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-en-v0_19.tar.bz2",
-        "kokoro-en-v0_19", 305, ModelType.KOKORO, "model.onnx", 0),
-    KOKORO_BELLA("EN Bella (F)", "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-en-v0_19.tar.bz2",
-        "kokoro-en-v0_19", 305, ModelType.KOKORO, "model.onnx", 2),
-    KOKORO_SARAH("EN Sarah (F)", "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-en-v0_19.tar.bz2",
-        "kokoro-en-v0_19", 305, ModelType.KOKORO, "model.onnx", 3),
-    KOKORO_SKY("EN Sky (F)", "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-en-v0_19.tar.bz2",
-        "kokoro-en-v0_19", 305, ModelType.KOKORO, "model.onnx", 4),
-    KOKORO_ADAM("EN Adam (M)", "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-en-v0_19.tar.bz2",
-        "kokoro-en-v0_19", 305, ModelType.KOKORO, "model.onnx", 5),
-    KOKORO_MICHAEL("EN Michael (M)", "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-en-v0_19.tar.bz2",
-        "kokoro-en-v0_19", 305, ModelType.KOKORO, "model.onnx", 6),
+    // System TTS (Android built-in, fast, works everywhere)
+    SYSTEM_EN("EN System", "", "", 0, ModelType.SYSTEM),
+    SYSTEM_DE("DE System", "", "", 0, ModelType.SYSTEM),
 
-    // Piper German
-    PIPER_THORSTEN("DE Thorsten (M)", "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-piper-de_DE-thorsten-high.tar.bz2",
+    // Kokoro English voices (slow on weak devices!)
+    KOKORO_HEART("EN Heart (F) [305MB]", "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-en-v0_19.tar.bz2",
+        "kokoro-en-v0_19", 305, ModelType.KOKORO, "model.onnx", 0),
+    KOKORO_ADAM("EN Adam (M) [305MB]", "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-en-v0_19.tar.bz2",
+        "kokoro-en-v0_19", 305, ModelType.KOKORO, "model.onnx", 5),
+
+    // Piper (faster on mobile than Kokoro)
+    PIPER_THORSTEN("DE Thorsten (M) [111MB]", "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-piper-de_DE-thorsten-high.tar.bz2",
         "vits-piper-de_DE-thorsten-high", 111, ModelType.PIPER, "de_DE-thorsten-high.onnx"),
 
-    // Piper French
-    PIPER_SIWIS("FR Siwis (F)", "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-piper-fr_FR-siwis-medium.tar.bz2",
+    PIPER_SIWIS("FR Siwis (F) [74MB]", "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-piper-fr_FR-siwis-medium.tar.bz2",
         "vits-piper-fr_FR-siwis-medium", 74, ModelType.PIPER, "fr_FR-siwis-medium.onnx");
 
-    fun isDownloaded(modelsDir: File): Boolean = File(modelsDir, modelDir).exists()
+    val isSystem get() = type == ModelType.SYSTEM
+    fun isDownloaded(modelsDir: File): Boolean = isSystem || File(modelsDir, modelDir).exists()
 }
 
 class SherpaOnnxTts(private val modelsBaseDir: File) {
